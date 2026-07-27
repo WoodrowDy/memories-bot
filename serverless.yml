@@ -1,10 +1,23 @@
 service: memories-wiki-bot
+frameworkVersion: '3'
+
+# 2단계 구조 — 함수 두 개가 큐 하나를 사이에 두고 갈라진다.
+#
+#   Slack → gateway (서명 검증 → 큐에 넣고 즉시 200)
+#            ↓ SQS
+#           worker  (LLM 툴 루프 → 스레드에 답글)
+#
+# 슬랙은 3초 안에 200을 못 받으면 재시도한다. 모델이 답을 만드는 데는 5~20초가
+# 걸리니, 큐가 없으면 같은 답이 세 번 달린다. 큐가 그 경계다.
+# 바이너리는 하나이고, 들어온 이벤트 모양을 보고 스스로 역할을 고른다.
 
 provider:
   name: aws
   runtime: provided.al2023
   architecture: arm64
   region: ${opt:region, 'ap-northeast-2'}
+  stage: ${opt:stage, 'dev'}
+  logRetentionInDays: 14
   environment:
     SLACK_SIGNING_SECRET: ${env:SLACK_SIGNING_SECRET}
     SLACK_BOT_TOKEN: ${env:SLACK_BOT_TOKEN}
@@ -12,18 +25,68 @@ provider:
     WIKI_REPO: ${env:WIKI_REPO, 'memories'}
     WIKI_BRANCH: ${env:WIKI_BRANCH, 'main'}
     GITHUB_TOKEN: ${env:GITHUB_TOKEN, ''}
+    # 비어 있으면 봇은 1차 키워드 검색으로 동작한다. 배포는 그대로 된다.
+    ANTHROPIC_API_KEY: ${env:ANTHROPIC_API_KEY, ''}
+    LLM_MODEL: ${env:LLM_MODEL, 'claude-haiku-4-5'}
+    JOBS_QUEUE_URL:
+      Ref: JobsQueue
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+          Resource:
+            Fn::GetAtt: [JobsQueue, Arn]
 
 package:
-  individually: true
   patterns:
     - '!./**'
     - bootstrap
 
 functions:
-  bot:
+  gateway:
     handler: bootstrap
     timeout: 15
+    memorySize: 256
     events:
       - httpApi:
           path: /slack/events
           method: POST
+
+  worker:
+    handler: bootstrap
+    timeout: 60
+    memorySize: 512
+    # LLM 호출은 돈이 나가니 동시 실행 수에 뚜껑을 덮어둔다.
+    reservedConcurrency: 2
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [JobsQueue, Arn]
+          batchSize: 1
+
+resources:
+  Resources:
+    JobsQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-jobs
+        # 워커 타임아웃(60초)의 6배 — AWS 권장치.
+        VisibilityTimeout: 360
+        # 한 시간 지난 질문에 이제 와서 답하는 건 안 하느니만 못하다.
+        MessageRetentionPeriod: 3600
+        RedrivePolicy:
+          deadLetterTargetArn:
+            Fn::GetAtt: [JobsDLQ, Arn]
+          maxReceiveCount: 3
+
+    JobsDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-jobs-dlq
+        # 실패한 건 14일 보관 — 나중에 왜 죽었는지 들여다볼 수 있게.
+        MessageRetentionPeriod: 1209600

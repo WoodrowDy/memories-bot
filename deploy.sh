@@ -18,7 +18,16 @@ fi
 : "${SLACK_BOT_TOKEN:?빠짐 — .env에 SLACK_BOT_TOKEN을 넣어줘 (OAuth & Permissions → xoxb-...)}"
 export GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 
+# 아래 둘은 없어도 배포된다 — 일부러 강제하지 않는다.
+# ANTHROPIC_API_KEY가 비면 자연어 브레인이 꺼지고 1차 키워드 검색으로 동작한다.
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+if [ -z "$ANTHROPIC_API_KEY" ]; then
+  echo "note: ANTHROPIC_API_KEY 없음 → 키워드 검색 모드로 배포됨 (자연어 브레인 off)"
+fi
+
+# 깨진 코드를 슬랙에 붙은 채로 배포하지 않도록 게이트
+go vet ./...
+go test ./...
+
 ./build.sh
 npx serverless deploy "$@"
-SH
-chmod +x deploy.sh build.sh

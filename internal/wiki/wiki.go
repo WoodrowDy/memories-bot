@@ -18,20 +18,32 @@ import (
 )
 
 type Config struct {
-	Owner  string
-	Repo   string
-	Branch string
-	Token  string // optional: GitHub token to raise the 60/hour unauth rate limit
+	Owner    string
+	Repo     string
+	Branch   string
+	Token    string        // optional: GitHub token to raise the 60/hour unauth rate limit
+	CacheTTL time.Duration // how long one loaded snapshot stays warm (default 60s)
 }
 
 type Client struct {
 	cfg  Config
 	http *http.Client
+
+	// A single LLM answer can fire several tool calls, and Lambda keeps
+	// containers warm between invocations. Without this cache every tool call
+	// re-walked the whole repo — which is precisely what burns the 60/hour
+	// unauthenticated GitHub budget.
+	mu       sync.Mutex
+	cached   []Note
+	cachedAt time.Time
 }
 
 func New(cfg Config) *Client {
 	if cfg.Branch == "" {
 		cfg.Branch = "main"
+	}
+	if cfg.CacheTTL == 0 {
+		cfg.CacheTTL = 60 * time.Second
 	}
 	return &Client{cfg: cfg, http: &http.Client{Timeout: 8 * time.Second}}
 }
@@ -117,14 +129,75 @@ func (c *Client) Status(ctx context.Context) (StatusReport, error) {
 	return rep, nil
 }
 
+// List returns a lightweight index of the wiki (no bodies), optionally limited
+// to one path prefix. This is what lets the bot answer "무슨 주제들 있어?"
+// without shipping every note body to the model.
+func (c *Client) List(ctx context.Context, prefix string) ([]Match, error) {
+	notes, err := c.loadNotes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []Match
+	for _, n := range notes {
+		if prefix != "" && !strings.HasPrefix(n.Path, prefix) {
+			continue
+		}
+		out = append(out, Match{Path: n.Path, Title: n.Title, Status: n.Status, URL: c.fileURL(n.Path)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
+// ReadNote fetches one note in full.
+//
+// The path arrives from an LLM, so it is validated here — in code, immediately
+// before the fetch — rather than trusted because the prompt asked nicely.
+func (c *Client) ReadNote(ctx context.Context, path string) (Note, error) {
+	if !IsNotePath(path) {
+		return Note{}, fmt.Errorf("허용되지 않은 경로: %q (위키 노트 경로여야 함)", path)
+	}
+	raw, err := c.getText(ctx, c.rawURL(path))
+	if err != nil {
+		return Note{}, err
+	}
+	return parseNote(path, raw), nil
+}
+
+// IsNotePath reports whether p is a path this bot is allowed to read: a .md
+// file under one of the wiki's content directories, with no traversal or
+// absolute/scheme trickery.
+func IsNotePath(p string) bool {
+	if p == "" || len(p) > 300 {
+		return false
+	}
+	if strings.HasPrefix(p, "/") || strings.Contains(p, "..") ||
+		strings.Contains(p, "://") || strings.ContainsAny(p, "\\\x00") {
+		return false
+	}
+	return strings.HasSuffix(p, ".md") && underContent(p)
+}
+
 // ---- fetching ----
 
 func (c *Client) loadNotes(ctx context.Context) ([]Note, error) {
+	c.mu.Lock()
+	if c.cached != nil && time.Since(c.cachedAt) < c.cfg.CacheTTL {
+		notes := c.cached
+		c.mu.Unlock()
+		return notes, nil
+	}
+	c.mu.Unlock()
+
 	paths, err := c.listNotePaths(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return c.fetchNotes(ctx, paths), nil
+	notes := c.fetchNotes(ctx, paths)
+
+	c.mu.Lock()
+	c.cached, c.cachedAt = notes, time.Now()
+	c.mu.Unlock()
+	return notes, nil
 }
 
 type treeResp struct {

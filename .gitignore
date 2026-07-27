@@ -1,13 +1,17 @@
-# serverless
-.serverless/
-
-# node
-node_modules/
-
-# env
+# 시크릿 — 절대 커밋 금지
 .env
 .env.*
 !.env.example
 
-# build
-bootstrap.serverless/
+# 빌드 산출물 (5MB 바이너리)
+bootstrap
+
+# serverless / node
+.serverless/
+node_modules/
+
+# macOS
+.DS_Store
+
+# 전달용 임시 압축 파일
+*.zip
