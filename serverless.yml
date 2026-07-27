@@ -1,0 +1,29 @@
+service: memories-wiki-bot
+
+provider:
+  name: aws
+  runtime: provided.al2023
+  architecture: arm64
+  region: ${opt:region, 'ap-northeast-2'}
+  environment:
+    SLACK_SIGNING_SECRET: ${env:SLACK_SIGNING_SECRET}
+    SLACK_BOT_TOKEN: ${env:SLACK_BOT_TOKEN}
+    WIKI_OWNER: ${env:WIKI_OWNER, 'WoodrowDy'}
+    WIKI_REPO: ${env:WIKI_REPO, 'memories'}
+    WIKI_BRANCH: ${env:WIKI_BRANCH, 'main'}
+    GITHUB_TOKEN: ${env:GITHUB_TOKEN, ''}
+
+package:
+  individually: true
+  patterns:
+    - '!./**'
+    - bootstrap
+
+functions:
+  bot:
+    handler: bootstrap
+    timeout: 15
+    events:
+      - httpApi:
+          path: /slack/events
+          method: POST

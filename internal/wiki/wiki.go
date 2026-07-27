@@ -1,0 +1,418 @@
+// Package wiki reads a public GitHub markdown wiki (the `memories` repo) and
+// answers "does a note on X exist?" plus a status summary. Read-only, no auth
+// (public repo). This is the bot's tool layer — the search_wiki / wiki_status
+// tools referenced in the proposal.
+package wiki
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+type Config struct {
+	Owner  string
+	Repo   string
+	Branch string
+	Token  string // optional: GitHub token to raise the 60/hour unauth rate limit
+}
+
+type Client struct {
+	cfg  Config
+	http *http.Client
+}
+
+func New(cfg Config) *Client {
+	if cfg.Branch == "" {
+		cfg.Branch = "main"
+	}
+	return &Client{cfg: cfg, http: &http.Client{Timeout: 8 * time.Second}}
+}
+
+// Note is one parsed wiki note (frontmatter + body).
+type Note struct {
+	Path    string
+	Title   string
+	Status  string
+	Tags    []string
+	Aliases []string
+	Body    string
+}
+
+// Match is a search hit, structured data only (rendering is the render pkg's job).
+type Match struct {
+	Path    string
+	Title   string
+	Status  string
+	Score   int
+	Snippet string
+	URL     string
+}
+
+// StatusReport is a snapshot of the wiki (for "위키 현황").
+type StatusReport struct {
+	TopicsByCat map[string]int
+	StatusCount map[string]int
+	Total       int
+	Daily       int
+	Personal    int
+}
+
+// Search returns notes matching the query, best first (max 5).
+func (c *Client) Search(ctx context.Context, query string) ([]Match, error) {
+	notes, err := c.loadNotes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var matches []Match
+	for _, n := range notes {
+		if score, snip := scoreNote(n, query); score > 0 {
+			matches = append(matches, Match{
+				Path: n.Path, Title: n.Title, Status: n.Status,
+				Score: score, Snippet: snip, URL: c.fileURL(n.Path),
+			})
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool { return matches[i].Score > matches[j].Score })
+	if len(matches) > 5 {
+		matches = matches[:5]
+	}
+	return matches, nil
+}
+
+// Status summarizes the wiki.
+func (c *Client) Status(ctx context.Context) (StatusReport, error) {
+	notes, err := c.loadNotes(ctx)
+	if err != nil {
+		return StatusReport{}, err
+	}
+	rep := StatusReport{TopicsByCat: map[string]int{}, StatusCount: map[string]int{}}
+	for _, n := range notes {
+		if strings.HasSuffix(n.Path, "/README.md") || strings.HasSuffix(n.Path, "README.md") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(n.Path, "topics/"):
+			parts := strings.Split(n.Path, "/")
+			if len(parts) >= 3 {
+				rep.TopicsByCat[parts[1]]++
+				rep.Total++
+				if n.Status != "" {
+					rep.StatusCount[n.Status]++
+				}
+			}
+		case strings.HasPrefix(n.Path, "daily/"):
+			rep.Daily++
+		case strings.HasPrefix(n.Path, "personal/"):
+			rep.Personal++
+		}
+	}
+	return rep, nil
+}
+
+// ---- fetching ----
+
+func (c *Client) loadNotes(ctx context.Context) ([]Note, error) {
+	paths, err := c.listNotePaths(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.fetchNotes(ctx, paths), nil
+}
+
+type treeResp struct {
+	Tree []struct {
+		Path string `json:"path"`
+		Type string `json:"type"`
+	} `json:"tree"`
+}
+
+func (c *Client) listNotePaths(ctx context.Context) ([]string, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1",
+		c.cfg.Owner, c.cfg.Repo, c.cfg.Branch)
+	var tr treeResp
+	if err := c.getJSON(ctx, url, &tr); err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, e := range tr.Tree {
+		if e.Type == "blob" && strings.HasSuffix(e.Path, ".md") && underContent(e.Path) {
+			paths = append(paths, e.Path)
+		}
+	}
+	return paths, nil
+}
+
+func underContent(p string) bool {
+	for _, pre := range []string{"topics/", "daily/", "personal/", "projects/"} {
+		if strings.HasPrefix(p, pre) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) fetchNotes(ctx context.Context, paths []string) []Note {
+	const workers = 6
+	jobs := make(chan string)
+	out := make(chan Note)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for p := range jobs {
+				if raw, err := c.getText(ctx, c.rawURL(p)); err == nil {
+					out <- parseNote(p, raw)
+				}
+			}
+		}()
+	}
+	go func() {
+		for _, p := range paths {
+			jobs <- p
+		}
+		close(jobs)
+	}()
+	go func() { wg.Wait(); close(out) }()
+
+	var notes []Note
+	for n := range out {
+		notes = append(notes, n)
+	}
+	return notes
+}
+
+func (c *Client) rawURL(path string) string {
+	return fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s",
+		c.cfg.Owner, c.cfg.Repo, c.cfg.Branch, path)
+}
+
+func (c *Client) fileURL(path string) string {
+	return fmt.Sprintf("https://github.com/%s/%s/blob/%s/%s",
+		c.cfg.Owner, c.cfg.Repo, c.cfg.Branch, path)
+}
+
+func (c *Client) getJSON(ctx context.Context, url string, out any) error {
+	body, err := c.getText(ctx, url)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal([]byte(body), out)
+}
+
+func (c *Client) getText(ctx context.Context, url string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "memories-wiki-bot")
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if c.cfg.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.cfg.Token)
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	b, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", err
+	}
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GET %s -> %d", url, res.StatusCode)
+	}
+	return string(b), nil
+}
+
+// ---- parsing ----
+
+var (
+	fmRe    = regexp.MustCompile(`(?s)^---\s*\n(.*?)\n---`)
+	titleRe = regexp.MustCompile(`(?m)^#\s+(.+)$`)
+)
+
+func parseNote(path, raw string) Note {
+	n := Note{Path: path, Body: raw}
+	if m := fmRe.FindStringSubmatch(raw); m != nil {
+		block := m[1]
+		n.Title = fmScalar(block, "title")
+		n.Status = fmScalar(block, "status")
+		n.Tags = fmList(block, "tags")
+		n.Aliases = fmList(block, "aliases")
+		n.Body = raw[len(m[0]):]
+	}
+	if n.Title == "" {
+		if h := titleRe.FindStringSubmatch(raw); h != nil {
+			n.Title = strings.TrimSpace(h[1])
+		}
+	}
+	if n.Title == "" {
+		n.Title = path
+	}
+	return n
+}
+
+func fmScalar(block, key string) string {
+	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `:\s*(.*)$`)
+	if m := re.FindStringSubmatch(block); m != nil {
+		return strings.TrimSpace(strings.Trim(strings.TrimSpace(m[1]), `"'`))
+	}
+	return ""
+}
+
+func fmList(block, key string) []string {
+	v := fmScalar(block, key)
+	v = strings.TrimSpace(strings.Trim(v, "[]"))
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		p = strings.TrimSpace(strings.Trim(strings.TrimSpace(p), `"'`))
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// ---- scoring (Korean-aware, heuristic) ----
+
+var stopWords = map[string]bool{
+	"정리": true, "정리한": true, "거": true, "있어": true, "있나": true, "있는지": true,
+	"뭐": true, "알려줘": true, "관련": true, "대해": true, "내": true, "나": true,
+	"좀": true, "해줘": true, "봐": true, "위키": true,
+	"the": true, "a": true, "is": true, "about": true, "of": true, "on": true, "me": true,
+}
+
+var particles = []string{"이랑", "랑", "으로", "에서", "에게", "한테", "까지", "부터", "이나", "와", "과", "이", "가", "은", "는", "을", "를", "에", "의", "도", "로", "만", "라고"}
+
+func tokenize(q string) []string {
+	q = strings.ToLower(q)
+	fields := strings.FieldsFunc(q, func(r rune) bool {
+		switch r {
+		case ' ', '\t', '\n', '?', '!', ',', '.', '"', '\'', '(', ')', '/':
+			return true
+		}
+		return false
+	})
+	var out []string
+	for _, f := range fields {
+		if !stopWords[f] {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func candidates(term string) []string {
+	cands := []string{term}
+	for _, p := range particles {
+		if strings.HasSuffix(term, p) {
+			base := term[:len(term)-len(p)]
+			if len([]rune(base)) >= 2 {
+				cands = append(cands, base)
+			}
+		}
+	}
+	return cands
+}
+
+func scoreNote(n Note, query string) (int, string) {
+	ql := strings.ToLower(query)
+	searchText := strings.ToLower(strings.Join([]string{
+		n.Title, strings.Join(n.Aliases, " "), strings.Join(n.Tags, " "), n.Path, n.Body,
+	}, "\n"))
+
+	score := 0
+	// 1) a note's alias/title appearing inside the query is a strong signal.
+	for _, a := range n.Aliases {
+		a = strings.ToLower(strings.TrimSpace(a))
+		if len([]rune(a)) >= 2 && strings.Contains(ql, a) {
+			score += 6
+		}
+	}
+	if t := strings.ToLower(n.Title); len([]rune(t)) >= 2 && strings.Contains(ql, t) {
+		score += 6
+	}
+
+	// 2) query terms (particle-stripped) found in the note.
+	matched := ""
+	for _, term := range tokenize(query) {
+		for _, cand := range candidates(term) {
+			if len([]rune(cand)) < 2 {
+				continue
+			}
+			if strings.Contains(searchText, cand) {
+				if strings.Contains(strings.ToLower(n.Title), cand) ||
+					containsAny(n.Aliases, cand) || containsAny(n.Tags, cand) {
+					score += 4
+				} else {
+					score += 2
+				}
+				if matched == "" {
+					matched = cand
+				}
+				break
+			}
+		}
+	}
+
+	if score == 0 {
+		return 0, ""
+	}
+	return score, snippet(n, matched)
+}
+
+func containsAny(list []string, sub string) bool {
+	for _, s := range list {
+		if strings.Contains(strings.ToLower(s), sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func snippet(n Note, term string) string {
+	lines := strings.Split(n.Body, "\n")
+	skip := func(l string) bool {
+		return l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "---") ||
+			strings.HasPrefix(l, "```") || strings.HasPrefix(l, "![") || strings.HasPrefix(l, ">")
+	}
+	if term != "" {
+		for _, ln := range lines {
+			l := strings.TrimSpace(ln)
+			if skip(l) {
+				continue
+			}
+			if strings.Contains(strings.ToLower(l), term) {
+				return trimRunes(l, 140)
+			}
+		}
+	}
+	for _, ln := range lines {
+		l := strings.TrimSpace(ln)
+		if skip(l) {
+			continue
+		}
+		return trimRunes(l, 140)
+	}
+	return ""
+}
+
+func trimRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}

@@ -1,0 +1,13 @@
+# serverless
+.serverless/
+
+# node
+node_modules/
+
+# env
+.env
+.env.*
+!.env.example
+
+# build
+bootstrap.serverless/
