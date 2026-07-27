@@ -88,6 +88,9 @@ brain: turns=2 in=4210 out=180 tools=[search_wiki read_note]
 - **`slack post: invalid_auth`** → 재설치하며 `xoxb-`가 로테이션됨. 새 토큰을 `.env`에 넣고 재배포
 - **답이 항상 키워드 검색 수준** → CloudWatch에서 `brain: ... falling back` 줄을 찾아 이유 확인 (키 오타 / 크레딧 소진 / 모델명 오타)
 - **배포 권한 에러** → IAM에 Lambda·APIGateway·CloudFormation·IAM·SQS 권한
-- **`UnreservedConcurrentExecutions below its minimum value of [100]`** → 계정 동시 실행 한도가 낮은 새 계정이다. `serverless.yml`의 `reservedConcurrency: 2` 줄을 지우고 재배포 (LLM 동시 실행 상한만 없어진다)
+- **`UnreservedConcurrentExecutions below its minimum value of [10]`** → 계정 동시 실행 한도가 낮은
+  새 계정이다. 이미 `serverless.yml`에서 `reservedConcurrency` 대신 SQS 이벤트의
+  `maximumConcurrency`를 쓰도록 고쳐놓았으니 지금 코드엔 안 난다. 혹시 또 나오면 그건
+  어딘가에 `reservedConcurrency`가 다시 들어간 것 — 지우면 된다
 - **GitHub 403(rate limit)** → `.env`의 `GITHUB_TOKEN=`에 읽기 전용 PAT를 채우고 재배포. 공개 repo면 fine-grained PAT의 "Public Repositories (read-only)"로 충분
 - **싹 삭제** → `npx serverless remove`

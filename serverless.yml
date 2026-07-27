@@ -61,13 +61,19 @@ functions:
     handler: bootstrap
     timeout: 60
     memorySize: 512
-    # LLM 호출은 돈이 나가니 동시 실행 수에 뚜껑을 덮어둔다.
-    reservedConcurrency: 2
     events:
       - sqs:
           arn:
             Fn::GetAtt: [JobsQueue, Arn]
           batchSize: 1
+          # LLM 호출은 돈이 나가니 동시 실행 수에 뚜껑을 덮는다.
+          #
+          # reservedConcurrency가 아니라 여기(SQS 이벤트 소스)에 거는 이유:
+          # reservedConcurrency는 계정 동시성 풀에서 그만큼을 아예 떼어가고,
+          # AWS는 남은 몫이 최소치 아래로 떨어지면 배포를 거절한다. 신규 계정은
+          # 총 한도가 10이라 2만 떼도 걸린다. maximumConcurrency는 풀에서
+          # 떼어가지 않고 호출 수만 제한하므로 한도가 낮은 계정에서도 통과한다.
+          maximumConcurrency: 2
 
 resources:
   Resources:
