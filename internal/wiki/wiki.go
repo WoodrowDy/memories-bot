@@ -352,8 +352,16 @@ var (
 	titleRe = regexp.MustCompile(`(?m)^#\s+(.+)$`)
 )
 
-func parseNote(path, raw string) Note {
-	n := Note{Path: path, Body: raw}
+// ParseFrontmatter reads a markdown file's own frontmatter — nothing else.
+//
+// parseNote와 갈라 둔 건 되메우기 때문이다. 저쪽은 title이 비면 H1에서, 그것도 없으면
+// 경로에서 끌어와 채운다 — 위키에 있는 노트를 *보여줄* 때는 맞는 짓이다. 하지만
+// 첨부 파일에서 "우드로가 직접 적은 값"을 골라낼 때는 그 되메우기가 거짓말이 된다:
+// 파일 이름이 제목으로 둔갑해 프론트매터에 박히고, 봇은 그걸 그가 쓴 값으로 착각한다.
+//
+// 그래서 여기서는 없으면 없는 채로 둔다. 빈 칸이어야 채울 칸인 줄 안다.
+func ParseFrontmatter(raw string) Note {
+	n := Note{Body: raw}
 	if m := fmRe.FindStringSubmatch(raw); m != nil {
 		block := m[1]
 		n.Title = fmScalar(block, "title")
@@ -364,6 +372,12 @@ func parseNote(path, raw string) Note {
 		n.Frontmatter = raw[:len(m[0])] // "---\n…\n---", no trailing newline
 		n.Body = raw[len(m[0]):]
 	}
+	return n
+}
+
+func parseNote(path, raw string) Note {
+	n := ParseFrontmatter(raw)
+	n.Path = path
 	if n.Title == "" {
 		if h := titleRe.FindStringSubmatch(raw); h != nil {
 			n.Title = strings.TrimSpace(h[1])

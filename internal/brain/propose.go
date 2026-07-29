@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/WoodrowDy/memories-wiki-bot/internal/llm"
+	"github.com/WoodrowDy/memories-wiki-bot/internal/vault"
 	"github.com/WoodrowDy/memories-wiki-bot/internal/wiki"
 	"github.com/WoodrowDy/memories-wiki-bot/internal/wikiwrite"
 )
@@ -141,9 +142,9 @@ type proposeOut struct {
 	Reminder string   `json:"reminder"`
 }
 
-// runPropose opens the PR. draft is 우드로's original Slack message — the note
-// body comes from there, never from the model.
-func (b *Brain) runPropose(ctx context.Context, input json.RawMessage, draft string) (string, error) {
+// runPropose opens the PR. ask is 우드로's original Slack message — the note body
+// comes from there, never from the model.
+func (b *Brain) runPropose(ctx context.Context, input json.RawMessage, ask Ask) (string, error) {
 	if b.writer == nil || !b.writer.Enabled() {
 		return "", fmt.Errorf("쓰기가 꺼져 있어요 (GITHUB_WRITE_TOKEN 없음). 정리 결과를 글로만 답해주세요")
 	}
@@ -156,8 +157,27 @@ func (b *Brain) runPropose(ctx context.Context, input json.RawMessage, draft str
 		return "", err
 	}
 
-	body := draftBody(draft, in.BodyFrom)
-	if body == "" {
+	// 첨부가 왔으면 본문이 어디서 시작해 어디서 끝나는지가 애매하지 않다. 붙여넣기
+	// 경로에서 draftBody가 하는 일 — 펜스 벗기기, 지시문 잘라내기, 승인 줄 지우기 —
+	// 은 전부 "메시지 한 덩어리에 초안과 지시가 섞여 온다"는 사정 때문에 있는 것이고,
+	// 파일에는 그 사정이 없다. 파일은 파일이다.
+	//
+	// own은 그가 파일에 직접 적은 프론트매터다. wiki.ParseFrontmatter를 쓰는 건
+	// 되메우기가 없어서다 — 없는 title을 파일 이름으로 채워주면, 봇은 그걸 그가 적은
+	// 값으로 착각하고 빈 칸인 줄 모른다.
+	var own *wiki.Note
+	var body string
+	if ask.File != nil {
+		n := wiki.ParseFrontmatter(ask.File.Content)
+		own, body = &n, n.Body
+	} else {
+		body = draftBody(ask.Text, in.BodyFrom)
+	}
+	if strings.TrimSpace(body) == "" {
+		if ask.File != nil {
+			return "", fmt.Errorf("첨부한 %s에 본문이 없어요 — 프론트매터만 있거나 빈 파일이에요. "+
+				"내용이 있는 파일로 다시 올려달라고 슬랙에 답해주세요", ask.File.Name)
+		}
 		return "", fmt.Errorf("본문으로 쓸 원문이 없어요. 이 툴은 우드로가 보낸 글을 그대로 본문에 넣어요 — " +
 			"초안 없이 노트를 지어낼 수는 없어요. \"만들어라\"만 온 거라면 봇은 앞 메시지를 못 읽으니, " +
 			"초안을 \"만들어라\"와 같은 메시지에 붙여 다시 보내달라고 슬랙에 답해주세요")
@@ -179,9 +199,10 @@ func (b *Brain) runPropose(ctx context.Context, input json.RawMessage, draft str
 		body = mergeBody(prev.Body, body)
 	}
 
+	meta := resolveMeta(in, prev, own, b.today())
 	files := []wikiwrite.File{{
 		Path:    in.Path,
-		Content: renderNote(in, prev, body, b.today()),
+		Content: renderNote(meta, body),
 	}}
 	for _, a := range in.Also {
 		content, err := b.withFrontmatter(ctx, a)
@@ -191,10 +212,12 @@ func (b *Brain) runPropose(ctx context.Context, input json.RawMessage, draft str
 		files = append(files, wikiwrite.File{Path: a.Path, Content: content})
 	}
 
+	// 옵시디언 전용 문법은 세기만 하고 고치지 않는다. 본문에 손대는 순간 "원문 그대로"가
+	// 무너지고, 그 판단은 diff를 보는 사람 몫이다. PR 본문에 적어 두면 머지 직전에 보인다.
 	res, err := b.writer.Propose(ctx, wikiwrite.Proposal{
 		Slug:  in.Path,
 		Title: prTitle(in),
-		Body:  prBody(in, files),
+		Body:  prBody(in, files, meta, vault.Check(body)),
 		Files: files,
 	})
 	if err != nil {
@@ -652,46 +675,131 @@ func firstLine(s string) string {
 	return strings.TrimSpace(line)
 }
 
+// noteMeta is the frontmatter the file is about to get.
+//
+// 고르는 일(resolveMeta)과 찍는 일(renderNote)을 갈라 뒀다. 값의 출처가 셋으로
+// 늘어나면서 — 우드로가 파일에 적은 값 / 모델이 고른 값 / 이미 있던 노트의 값 —
+// 한 함수 안에서는 무엇이 무엇을 이겼는지 읽어낼 수가 없었다.
+type noteMeta struct {
+	Title   string
+	Aliases []string
+	Created string
+	Updated string
+	Tags    []string
+	Status  string
+
+	// Filled names the frontmatter 우드로 left blank and the bot wrote in.
+	//
+	// 첨부가 있을 때만 채운다. 붙여넣기 초안에는 "그가 적은 칸"이라는 게 아예 없어서
+	// 전부 봇이 정한 것이고, 그걸 다 적어봐야 PR 본문에 한 줄이 늘 뿐이다.
+	Filled []string
+
+	// Replaced is a value he wrote that the wiki cannot take.
+	//
+	// 채운 것과 갈라 둔다: 빈 칸을 채운 건 몰라도 그만이지만, 그가 적은 걸 봇이 바꿨으면
+	// 그건 알아야 한다.
+	Replaced []string
+}
+
+// resolveMeta decides each frontmatter line and records what the bot supplied.
+//
+// 순서는 하나다: 우드로가 파일에 적은 값 > 모델이 고른 값 > 이미 있던 노트의 값.
+// created만 예외로 이미 있던 값이 모델보다 세다 — 그 칸은 역사라서, 오늘 날짜로
+// 덮으면 그 노트가 언제부터 있었는지가 영영 사라진다.
+func resolveMeta(in proposeIn, prev, own *wiki.Note, today string) noteMeta {
+	// 빈 값이면 없는 것. 포인터 검사를 여기서 한 번만 하고 아래로는 값으로 다룬다.
+	var his, old wiki.Note
+	if own != nil {
+		his = *own
+	}
+	if prev != nil {
+		old = *prev
+	}
+
+	m := noteMeta{Updated: today}
+	fill := func(key string) {
+		if own != nil {
+			m.Filled = append(m.Filled, key)
+		}
+	}
+
+	switch {
+	case his.Title != "":
+		m.Title = his.Title
+	case strings.TrimSpace(in.Title) != "":
+		m.Title = in.Title
+		fill("title")
+	default:
+		m.Title = old.Title
+	}
+
+	// 목록에도 "빈 칸만 채운다"가 그대로 걸린다. 그가 파일에 tags를 적었으면 그게 그의
+	// 분류이고, 거기에 모델이 하나 더 얹는 건 채운 게 아니라 고친 거다. 옵시디언에서
+	// 일부러 뗀 태그가 PR마다 되살아나는 것만큼 사람을 지치게 하는 것도 없다.
+	m.Aliases = pickList(old.Aliases, his.Aliases, in.Aliases)
+	m.Tags = pickList(old.Tags, his.Tags, in.Tags)
+	if len(his.Aliases) == 0 && len(m.Aliases) > 0 {
+		fill("aliases")
+	}
+	if len(his.Tags) == 0 && len(m.Tags) > 0 {
+		fill("tags")
+	}
+
+	// 모델은 이 칸을 아예 못 채운다 — propose_note에 created 인자가 없다. 그래서
+	// 다툼은 "그가 적은 값 vs 이미 있던 값 vs 오늘"뿐이고, 오늘은 맨 마지막이다.
+	switch {
+	case his.Created != "":
+		m.Created = his.Created
+	case old.Created != "":
+		m.Created = old.Created
+	default:
+		m.Created = today
+		fill("created")
+	}
+
+	// 봇이 고를 값. keepMature는 모델이 습관처럼 seedling을 써서 evergreen 노트를
+	// 끌어내리는 걸 막는 장치다.
+	bot := keepMature(old.Status, in.Status)
+	if bot == "" {
+		bot = "seedling"
+	}
+	switch {
+	case validStatus[his.Status]:
+		// 그가 파일에 손으로 적은 값은 keepMature를 거치지 않는다. 그 장치는 모델의
+		// 습관을 막으려는 것이지, 사람이 적은 archived를 되돌리려는 게 아니다.
+		m.Status = his.Status
+	case his.Status != "":
+		// 옵시디언 템플릿엔 status: draft 같은 게 흔하다. 그대로 실으면 그날부터
+		// "위키 현황"의 편수가 어긋난다 — 사다리는 이 넷뿐이라 다른 값은 셀 자리가 없다.
+		m.Status = bot
+		m.Replaced = append(m.Replaced, fmt.Sprintf(
+			"status `%s` → `%s` (위키 status는 seedling·growing·evergreen·archived 넷뿐이에요)",
+			his.Status, bot))
+	default:
+		m.Status = bot
+		fill("status")
+	}
+	return m
+}
+
 // renderNote builds the file: frontmatter in the wiki's key order, then body.
 //
-// body is passed in rather than read off in because it is 우드로's text, not the
-// model's — see draftBody above.
-//
-// On update the previous frontmatter is merged rather than replaced — created
-// is preserved, tags and aliases are unioned, and an omitted status keeps the
-// old one so a tidy-up can never quietly demote an evergreen note to seedling.
-func renderNote(in proposeIn, prev *wiki.Note, body, today string) string {
-	title, status := in.Title, in.Status
-	tags, aliases := in.Tags, in.Aliases
-	created := today
-
-	if prev != nil {
-		if title == "" {
-			title = prev.Title
-		}
-		status = keepMature(prev.Status, status)
-		if prev.Created != "" {
-			created = prev.Created
-		}
-		tags = union(prev.Tags, tags)
-		aliases = union(prev.Aliases, aliases)
-	}
-	if status == "" {
-		status = "seedling"
-	}
-
+// body is passed in rather than read off the model's input because it is
+// 우드로's text — 붙여넣은 초안이면 draftBody가, 첨부 파일이면 파일 자신이 준 글이다.
+// 이 함수가 하는 일은 그 위에 여섯 줄을 얹는 것뿐이다.
+func renderNote(m noteMeta, body string) string {
 	var b strings.Builder
 	b.WriteString("---\n")
-	fmt.Fprintf(&b, "title: %s\n", title)
-	if len(aliases) > 0 {
-		fmt.Fprintf(&b, "aliases: [%s]\n", strings.Join(aliases, ", "))
+	fmt.Fprintf(&b, "title: %s\n", m.Title)
+	if len(m.Aliases) > 0 {
+		fmt.Fprintf(&b, "aliases: [%s]\n", strings.Join(m.Aliases, ", "))
 	}
-	fmt.Fprintf(&b, "created: %s\n", created)
-	fmt.Fprintf(&b, "updated: %s\n", today)
-	if len(tags) > 0 {
-		fmt.Fprintf(&b, "tags: [%s]\n", strings.Join(tags, ", "))
+	fmt.Fprintf(&b, "created: %s\n", m.Created)
+	fmt.Fprintf(&b, "updated: %s\n", m.Updated)
+	if len(m.Tags) > 0 {
+		fmt.Fprintf(&b, "tags: [%s]\n", strings.Join(m.Tags, ", "))
 	}
-	fmt.Fprintf(&b, "status: %s\n", status)
+	fmt.Fprintf(&b, "status: %s\n", m.Status)
 	b.WriteString("---\n\n")
 	b.WriteString(strings.TrimSpace(body))
 	b.WriteString("\n")
@@ -723,6 +831,20 @@ func keepMature(prev, next string) string {
 	return next
 }
 
+// pickList resolves one list-valued frontmatter key: his, or the model's, never
+// both.
+//
+// old를 늘 합치는 건 다른 얘기다. update는 mergeBody가 기존 본문 *뒤에* 이어붙이는
+// 것뿐이라 옛 글이 노트에 그대로 남는다 — 그 글에 붙어 있던 태그를 떼면 남아 있는
+// 내용이 검색에서 사라진다. 첨부 파일로 태그를 지우는 길이 없는 건 그래서고, 그건
+// 이어붙이기의 성질이지 봇의 고집이 아니다.
+func pickList(old, his, model []string) []string {
+	if len(his) > 0 {
+		return union(old, his)
+	}
+	return union(old, model)
+}
+
 // union keeps the existing order and appends what is new, case-insensitively.
 func union(old, add []string) []string {
 	seen := map[string]bool{}
@@ -746,7 +868,7 @@ func prTitle(in proposeIn) string {
 	return fmt.Sprintf("노트: %s", in.Title)
 }
 
-func prBody(in proposeIn, files []wikiwrite.File) string {
+func prBody(in proposeIn, files []wikiwrite.File, m noteMeta, vr vault.Report) string {
 	var b strings.Builder
 	b.WriteString(strings.TrimSpace(in.Summary))
 	b.WriteString("\n\n### 담긴 파일\n")
@@ -761,6 +883,27 @@ func prBody(in proposeIn, files []wikiwrite.File) string {
 		}
 		fmt.Fprintf(&b, "- `%s` — %s\n", f.Path, why)
 	}
+
+	// 봇이 프론트매터에서 무엇을 했는지 한자리에 적는다. diff에도 다 나오지만, diff는
+	// 어느 줄이 그가 적은 것이고 어느 줄이 봇이 채운 것인지는 말해주지 않는다.
+	if len(m.Filled) > 0 {
+		fmt.Fprintf(&b, "\n### 봇이 채운 칸\n비어 있던 %s를 채웠습니다. 나머지는 올려주신 파일에 적힌 그대로입니다.\n",
+			strings.Join(backticked(m.Filled), " · "))
+	}
+	for _, r := range m.Replaced {
+		fmt.Fprintf(&b, "\n> [!WARNING]\n> 적어주신 값을 하나 바꿨습니다 — %s\n", r)
+	}
+
+	// 옵시디언에서만 되는 문법. 세어서 알리기만 하고 고치지는 않는다 — 본문을 손대는
+	// 순간 "원문 그대로"라는 약속이 무너지고, 고칠지 말지는 이 PR을 보는 사람이 정한다.
+	if !vr.OK() {
+		b.WriteString("\n### 옵시디언에서만 되는 문법\n")
+		b.WriteString("GitHub에서 다르게 보일 자리입니다. 고치지 않고 그대로 뒀으니, 필요하면 여기서 손보세요.\n")
+		for _, ln := range vr.Lines() {
+			fmt.Fprintf(&b, "- %s\n", ln)
+		}
+	}
+
 	// Said in the PR, not just in the code: a reviewer who thinks the bot
 	// rewrote the prose will read the diff differently than one who knows it
 	// didn't.
@@ -768,4 +911,12 @@ func prBody(in proposeIn, files []wikiwrite.File) string {
 		"분류(status·tags·aliases)만 정했습니다. 문장은 손대지 않았습니다.\n")
 	b.WriteString("\n---\n🤖 `memories-wiki-bot`이 연 PR입니다. 내용을 확인하고 머지해주세요.\n")
 	return b.String()
+}
+
+func backticked(keys []string) []string {
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		out[i] = "`" + k + "`"
+	}
+	return out
 }

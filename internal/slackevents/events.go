@@ -9,6 +9,23 @@ type AppMention struct {
 	Text     string
 	TS       string
 	ThreadTS string
+
+	// Files are the attachments Slack listed on the mention — metadata only.
+	//
+	// 바이트는 여기서 안 받는다. 게이트웨이는 슬랙에 3초 안에 ack해야 하고, 파일
+	// 하나 받아오는 데 그 시간이 통째로 날아갈 수 있다. 받는 건 워커 일이다.
+	Files []File
+}
+
+// File is one attachment, as Slack describes it before anything is fetched.
+type File struct {
+	ID         string
+	Name       string
+	Title      string
+	URLPrivate string // 봇 토큰을 Bearer로 붙여야 열린다 — 공개 URL이 아니다
+	Size       int
+	Filetype   string
+	Mimetype   string
 }
 
 type outer struct {
@@ -18,12 +35,23 @@ type outer struct {
 }
 
 type innerEvent struct {
-	Type     string `json:"type"`
-	Channel  string `json:"channel"`
-	User     string `json:"user"`
-	Text     string `json:"text"`
-	TS       string `json:"ts"`
-	ThreadTS string `json:"thread_ts"`
+	Type     string      `json:"type"`
+	Channel  string      `json:"channel"`
+	User     string      `json:"user"`
+	Text     string      `json:"text"`
+	TS       string      `json:"ts"`
+	ThreadTS string      `json:"thread_ts"`
+	Files    []innerFile `json:"files"`
+}
+
+type innerFile struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Title      string `json:"title"`
+	URLPrivate string `json:"url_private"`
+	Size       int    `json:"size"`
+	Filetype   string `json:"filetype"`
+	Mimetype   string `json:"mimetype"`
 }
 
 // Challenge returns the url_verification challenge string if this is that request.
@@ -51,11 +79,23 @@ func ParseAppMention(body string) (AppMention, bool) {
 	if ie.Type != "app_mention" {
 		return AppMention{}, false
 	}
-	return AppMention{
+	m := AppMention{
 		Channel:  ie.Channel,
 		User:     ie.User,
 		Text:     ie.Text,
 		TS:       ie.TS,
 		ThreadTS: ie.ThreadTS,
-	}, true
+	}
+	for _, f := range ie.Files {
+		// url_private 없이는 아무것도 못 하니 그런 항목은 애초에 싣지 않는다.
+		// 슬랙이 파일을 지웠거나 아직 업로드 중이면 이 칸이 빈다.
+		if f.URLPrivate == "" {
+			continue
+		}
+		m.Files = append(m.Files, File{
+			ID: f.ID, Name: f.Name, Title: f.Title, URLPrivate: f.URLPrivate,
+			Size: f.Size, Filetype: f.Filetype, Mimetype: f.Mimetype,
+		})
+	}
+	return m, true
 }

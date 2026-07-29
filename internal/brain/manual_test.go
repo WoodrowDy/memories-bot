@@ -2,8 +2,11 @@ package brain
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 )
 
 // 매뉴얼은 코드에 박힌 문구지만, 그 안의 승인 낱말은 goAhead의 복사본이다. 복사본은
@@ -61,6 +64,41 @@ func TestTheManualIsSlackMrkdwn(t *testing.T) {
 	// 하나면 슬랙이 그 뒤를 통째로 코드블록으로 먹어 매뉴얼 절반이 사라진다.
 	if strings.Contains(manualText, "```") {
 		t.Error("매뉴얼에 백틱 세 개가 있다. 코드블록은 말로 설명해야 한다")
+	}
+}
+
+// boldRunsThatLeak은 별표가 낱말 안에 파묻힌 굵게 구간을 돌려준다. 슬랙은 그런
+// 구간을 굵게 만들지 않고 별표를 글자 그대로 찍는다.
+func boldRunsThatLeak(s string) []string {
+	word := func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+	}
+
+	var bad []string
+	for _, m := range regexp.MustCompile(`\*[^*\n]+\*`).FindAllStringIndex(s, -1) {
+		before, _ := utf8.DecodeLastRuneInString(s[:m[0]])
+		after, _ := utf8.DecodeRuneInString(s[m[1]:])
+		if (m[0] > 0 && word(before)) || (m[1] < len(s) && word(after)) {
+			bad = append(bad, s[m[0]:m[1]])
+		}
+	}
+	return bad
+}
+
+// 슬랙 굵게는 별표가 낱말 경계에 있어야 열린다. `*같은 메시지*에`처럼 닫는 별표 뒤에
+// 조사가 바로 붙으면 별표가 그대로 찍힌다 — 한국어로 쓰는 한 계속 밟을 자리인데,
+// 코드로는 멀쩡해 보이고 슬랙에 띄워야만 보인다. 실제로 한 번 새어나갔다.
+func TestTheManualsBoldRunsSitOnWordBoundaries(t *testing.T) {
+	// 잣대부터 믿을 수 있게 한다. 앞엣것은 실제로 슬랙에 별표가 찍혔던 문장이다.
+	if got := boldRunsThatLeak("승인은 초안과 *같은 메시지*에 넣어주세요"); len(got) == 0 {
+		t.Fatal("정말 새어나갔던 문장을 못 잡는다 — 이 테스트는 아무것도 안 지키고 있다")
+	}
+	if got := boldRunsThatLeak("승인은 *초안과 같은 메시지에* 넣어주세요"); len(got) != 0 {
+		t.Fatalf("멀쩡한 문장을 잡는다: %q", got)
+	}
+
+	if got := boldRunsThatLeak(manualText); len(got) != 0 {
+		t.Errorf("슬랙에 별표가 그대로 찍힌다 — 별표는 낱말 경계에 놔야 한다: %q", got)
 	}
 }
 

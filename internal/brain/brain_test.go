@@ -201,7 +201,7 @@ func TestReadNoteTruncatesLongBodies(t *testing.T) {
 	}}
 	b := New(&fakeLLM{}, w, "m", "o", "r")
 
-	out, err := b.runTool(context.Background(), "read_note", json.RawMessage(`{"path":"topics/cs/x.md"}`), "")
+	out, err := b.runTool(context.Background(), "read_note", json.RawMessage(`{"path":"topics/cs/x.md"}`), Ask{Text: ""})
 	if err != nil {
 		t.Fatal(err)
 	}

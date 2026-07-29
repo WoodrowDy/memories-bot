@@ -97,7 +97,7 @@ func TestProposeToolIsOfferedOnlyWhenWritingIsOn(t *testing.T) {
 func TestRunToolRefusesProposeWhenWritingIsOff(t *testing.T) {
 	b := New(&fakeLLM{}, &fakeWiki{}, "m", "o", "r")
 
-	out, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), goDraft)
+	out, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), Ask{Text: goDraft})
 	if err == nil {
 		t.Fatalf("read-only brain proposed a note: %s", out)
 	}
@@ -182,7 +182,7 @@ func TestProposeRefusesBeforeTouchingTheWriter(t *testing.T) {
 	b, w := writingBrain(nil)
 
 	_, err := b.runTool(context.Background(), "propose_note",
-		json.RawMessage(`{"path":"CONVENTIONS.md","mode":"create","title":"x","status":"seedling","tags":["x"],"summary":"s"}`), goDraft)
+		json.RawMessage(`{"path":"CONVENTIONS.md","mode":"create","title":"x","status":"seedling","tags":["x"],"summary":"s"}`), Ask{Text: goDraft})
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}
@@ -198,7 +198,7 @@ func TestProposeRefusesCreateOnANoteThatAlreadyExists(t *testing.T) {
 		"topics/cs/grpc.md": {Path: "topics/cs/grpc.md", Title: "gRPC", Status: "growing"},
 	})
 
-	_, err := b.runPropose(context.Background(), json.RawMessage(goodPropose), draft)
+	_, err := b.runPropose(context.Background(), json.RawMessage(goodPropose), Ask{Text: draft})
 	if err == nil {
 		t.Fatal("a create over an existing note would silently replace it")
 	}
@@ -214,7 +214,7 @@ func TestProposeRefusesUpdateOnANoteThatDoesNotExist(t *testing.T) {
 	b, w := writingBrain(nil)
 	in := strings.Replace(goodPropose, `"mode": "create"`, `"mode": "update"`, 1)
 
-	_, err := b.runPropose(context.Background(), json.RawMessage(in), draft)
+	_, err := b.runPropose(context.Background(), json.RawMessage(in), Ask{Text: draft})
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}
@@ -232,7 +232,7 @@ func TestProposeStopsWhenTheRepoCannotBeRead(t *testing.T) {
 	b, w := writingBrain(nil)
 	b.wiki = &flakyWiki{err: errors.New("github: 502 bad gateway")}
 
-	_, err := b.runPropose(context.Background(), json.RawMessage(goodPropose), draft)
+	_, err := b.runPropose(context.Background(), json.RawMessage(goodPropose), Ask{Text: draft})
 	if err == nil {
 		t.Fatal("a transient read failure was treated as 'note absent'")
 	}
@@ -282,7 +282,7 @@ func TestRenderNoteWritesFrontmatterInTheWikisOrder(t *testing.T) {
 		Path: "topics/cs/grpc.md", Mode: "create", Title: "gRPC", Status: "seedling",
 		Tags: []string{"cs/grpc", "cs/network"}, Aliases: []string{"그RPC"},
 	}
-	got := renderNote(in, nil, "\n## 한 줄\n프로토콜 버퍼를 쓰는 RPC.\n\n", "2026-07-22")
+	got := renderNote(resolveMeta(in, nil, nil, "2026-07-22"), "\n## 한 줄\n프로토콜 버퍼를 쓰는 RPC.\n\n")
 
 	want := "---\ntitle: gRPC\naliases: [그RPC]\ncreated: 2026-07-22\nupdated: 2026-07-22\n" +
 		"tags: [cs/grpc, cs/network]\nstatus: seedling\n---\n\n## 한 줄\n프로토콜 버퍼를 쓰는 RPC.\n"
@@ -296,7 +296,7 @@ func TestRenderNoteOmitsEmptyListsRatherThanWritingBlankOnes(t *testing.T) {
 		Path: "daily/2026-07-22.md", Mode: "create", Title: "7월 22일",
 		Status: "seedling",
 	}
-	got := renderNote(in, nil, "메모", "2026-07-22")
+	got := renderNote(resolveMeta(in, nil, nil, "2026-07-22"), "메모")
 
 	if strings.Contains(got, "aliases:") || strings.Contains(got, "tags:") {
 		t.Errorf("empty lists should be left out entirely:\n%s", got)
@@ -312,7 +312,7 @@ func TestRenderNoteUpdateKeepsCreatedAndUnionsTags(t *testing.T) {
 		Path: "topics/cs/grpc.md", Mode: "update", Title: "gRPC",
 		Tags: []string{"cs/network"}, Aliases: []string{"grpc"},
 	}
-	got := renderNote(in, prev, "합친 본문", "2026-07-22")
+	got := renderNote(resolveMeta(in, prev, nil, "2026-07-22"), "합친 본문")
 
 	for _, want := range []string{
 		"created: 2025-01-05",
@@ -344,7 +344,7 @@ func TestRenderNoteUpdateNeverDemotesAMatureNote(t *testing.T) {
 		prev := &wiki.Note{Path: "topics/cs/grpc.md", Title: "gRPC", Status: c.prev, Created: "2024-11-02"}
 		in := proposeIn{Path: "topics/cs/grpc.md", Mode: "update", Title: "gRPC", Status: c.asked}
 
-		got := renderNote(in, prev, "보강", "2026-07-22")
+		got := renderNote(resolveMeta(in, prev, nil, "2026-07-22"), "보강")
 		if !strings.Contains(got, "status: "+c.want+"\n") {
 			t.Errorf("prev=%q asked=%q → want status %q, got:\n%s", c.prev, c.asked, c.want, got)
 		}
@@ -386,7 +386,7 @@ func TestTodayIsSeoulTimeNotUTC(t *testing.T) {
 func TestProposeOpensAPRAndReportsItBack(t *testing.T) {
 	b, w := writingBrain(nil)
 
-	out, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), goDraft)
+	out, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), Ask{Text: goDraft})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +457,7 @@ func TestProposeUpdateTitlesThePRAsAnAddition(t *testing.T) {
 	})
 	in := strings.Replace(goodPropose, `"mode": "create"`, `"mode": "update"`, 1)
 
-	if _, err := b.runPropose(context.Background(), json.RawMessage(in), draft); err != nil {
+	if _, err := b.runPropose(context.Background(), json.RawMessage(in), Ask{Text: draft}); err != nil {
 		t.Fatal(err)
 	}
 	p := w.got[0]
@@ -479,7 +479,7 @@ func TestProposeReportsAWriteFailureToTheModel(t *testing.T) {
 	b, w := writingBrain(nil)
 	w.fail = errors.New("github: 403 forbidden")
 
-	if _, err := b.runPropose(context.Background(), json.RawMessage(goodPropose), draft); err == nil {
+	if _, err := b.runPropose(context.Background(), json.RawMessage(goodPropose), Ask{Text: draft}); err == nil {
 		t.Fatal("a failed PR must not be reported as success")
 	}
 }
@@ -492,7 +492,7 @@ func TestProposeReportsAWriteFailureToTheModel(t *testing.T) {
 func TestTheNoteBodyIsTheDraftVerbatim(t *testing.T) {
 	b, w := writingBrain(nil)
 
-	if _, err := b.runPropose(context.Background(), json.RawMessage(goodPropose), draft); err != nil {
+	if _, err := b.runPropose(context.Background(), json.RawMessage(goodPropose), Ask{Text: draft}); err != nil {
 		t.Fatal(err)
 	}
 	content := w.got[0].Files[0].Content
@@ -512,7 +512,7 @@ func TestALongDraftSurvivesWhole(t *testing.T) {
 	b, w := writingBrain(nil)
 	long := "# GoF\n\n" + strings.Repeat("객체지향 디자인 패턴은 반복되는 설계 문제의 이름 붙은 해법이다. ", 2000)
 
-	if _, err := b.runPropose(context.Background(), json.RawMessage(goodPropose), long); err != nil {
+	if _, err := b.runPropose(context.Background(), json.RawMessage(goodPropose), Ask{Text: long}); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := w.got[0].Files[0].Content, strings.TrimSpace(long); !strings.Contains(got, want) {
@@ -525,7 +525,7 @@ func TestALongDraftSurvivesWhole(t *testing.T) {
 func TestProposeRefusesWithNothingToFile(t *testing.T) {
 	b, w := writingBrain(nil)
 
-	_, err := b.runPropose(context.Background(), json.RawMessage(goodPropose), "   \n\n  ")
+	_, err := b.runPropose(context.Background(), json.RawMessage(goodPropose), Ask{Text: "   \n\n  "})
 	if err == nil {
 		t.Fatal("a note was proposed with no draft behind it")
 	}
@@ -686,7 +686,7 @@ func TestTheGoAheadWordDoesNotLandInTheNote(t *testing.T) {
 	}
 
 	b, w := writingBrain(nil)
-	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), goDraft); err != nil {
+	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), Ask{Text: goDraft}); err != nil {
 		t.Fatal(err)
 	}
 	if got := w.got[0].Files[0].Content; strings.Contains(got, "올려줘") {
@@ -800,7 +800,7 @@ func TestAFencedDraftOnItsOwnIsStillOnlyARecommendation(t *testing.T) {
 	}
 
 	b, w := writingBrain(nil)
-	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), msg); err == nil {
+	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), Ask{Text: msg}); err == nil {
 		t.Fatal("승인 없는 초안이 PR을 열었다")
 	}
 	if len(w.got) != 0 {
@@ -869,7 +869,7 @@ func TestAFencedDraftIsFiledVerbatim(t *testing.T) {
 	b, w := writingBrain(nil)
 	msg := "```\n" + gofLike + "\n```\n\n만들어라"
 
-	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), msg); err != nil {
+	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), Ask{Text: msg}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -888,7 +888,7 @@ func TestAFencedDraftIsFiledVerbatim(t *testing.T) {
 func TestProposeIsRefusedUntilHeSaysSo(t *testing.T) {
 	b, w := writingBrain(nil)
 
-	out, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), draft)
+	out, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), Ask{Text: draft})
 	if err == nil {
 		t.Fatalf("a bare draft opened a PR: %s", out)
 	}
@@ -971,7 +971,7 @@ func TestProposeUpdateAppendsRatherThanReplacing(t *testing.T) {
 	})
 	in := strings.Replace(goodPropose, `"mode": "create"`, `"mode": "update"`, 1)
 
-	if _, err := b.runPropose(context.Background(), json.RawMessage(in), draft); err != nil {
+	if _, err := b.runPropose(context.Background(), json.RawMessage(in), Ask{Text: draft}); err != nil {
 		t.Fatal(err)
 	}
 	content := w.got[0].Files[0].Content
@@ -1002,7 +1002,7 @@ func TestAlsoRestoresTheFrontmatterTheModelNeverSaw(t *testing.T) {
 		},
 	})
 
-	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), goDraft); err != nil {
+	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), Ask{Text: goDraft}); err != nil {
 		t.Fatal(err)
 	}
 	got := w.got[0].Files[1].Content
@@ -1043,7 +1043,7 @@ func TestAlsoDiscardsFrontmatterTheModelInvented(t *testing.T) {
 	    "content": "---\ntitle: CS\ncreated: 2026-07-22\n---\n\n# cs\n\n- [gRPC](grpc.md)\n"
 	  }]
 	}`
-	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(in), goDraft); err != nil {
+	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(in), Ask{Text: goDraft}); err != nil {
 		t.Fatal(err)
 	}
 	got := w.got[0].Files[1].Content
@@ -1064,7 +1064,7 @@ func TestAlsoLeavesAFileThatNeverHadFrontmatterAlone(t *testing.T) {
 		"topics/cs/README.md": {Path: "topics/cs/README.md", Body: "# CS\n"},
 	})
 
-	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), goDraft); err != nil {
+	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), Ask{Text: goDraft}); err != nil {
 		t.Fatal(err)
 	}
 	if got := w.got[0].Files[1].Content; got != "# cs\n\n- [gRPC](grpc.md)\n" {

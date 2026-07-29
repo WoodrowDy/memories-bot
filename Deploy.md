@@ -15,7 +15,10 @@ go vet ./... && go test ./...   # (선택) 로컬 검증
 ## ② 슬랙 앱 + 토큰 2개 — 브라우저 (배포에 필요하니 먼저)
 
 1. https://api.slack.com/apps → **Create New App → From scratch** → 워크스페이스 선택
-2. **OAuth & Permissions → Bot Token Scopes**: `app_mentions:read`, `chat:write`
+2. **OAuth & Permissions → Bot Token Scopes**: `app_mentions:read`, `chat:write`, `files:read`
+   - `files:read`는 `.md` 첨부를 받기 위한 것. 없으면 슬랙이 이벤트에서 `files[]`를
+     **통째로 빼고** 보내서, 봇은 파일이 왔다는 사실조차 모른다 (에러도 안 난다).
+     붙여넣기로 쓸 거면 없어도 되지만, 그때는 첨부가 조용히 무시된다는 걸 알고 써야 한다.
 3. 위쪽 **Install to Workspace** → 승인 → **Bot User OAuth Token**(`xoxb-...`) 복사
 4. **Basic Information → Signing Secret** 복사
 
@@ -86,11 +89,17 @@ brain: turns=2 in=4210 out=180 tools=[search_wiki read_note]
 - **답이 늦거나 안 옴 (gateway 로그엔 있는데 worker가 조용)** → SQS 이벤트 소스가 안 붙었다. Lambda 콘솔 → worker → Triggers에 SQS가 있는지 확인
 - **같은 답이 두 번** → `worker`가 에러를 던져 SQS가 재전송한 것. DLQ(`...-jobs-dlq`)를 보면 원인이 남아 있다
 - **`slack post: invalid_auth`** → 재설치하며 `xoxb-`가 로테이션됨. 새 토큰을 `.env`에 넣고 재배포
+- **`.md`를 첨부했는데 봇이 못 본 척한다** → `files:read` 스코프가 없다. 슬랙이 이벤트에서
+  `files[]`를 빼고 보내므로 봇 쪽엔 아무 흔적도 안 남는다. 스코프 추가 → **Reinstall** →
+  새 `xoxb-`를 `.env`에 → 재배포
+- **봇이 `봇 토큰에 files:read 스코프가 없어 보여요`라고 답한다** → 스코프는 넣었는데 재설치를
+  안 했거나, 재설치로 새로 나온 `xoxb-`를 `.env`에 안 넣었다. 파일이 온 건 봤으니 이벤트
+  구독은 멀쩡하고 다운로드만 막힌 상태다. Reinstall → 새 토큰 → 재배포
 - **답이 항상 키워드 검색 수준** → CloudWatch에서 `brain: ... falling back` 줄을 찾아 이유 확인 (키 오타 / 크레딧 소진 / 모델명 오타)
 - **배포 권한 에러** → IAM에 Lambda·APIGateway·CloudFormation·IAM·SQS 권한
 - **`UnreservedConcurrentExecutions below its minimum value of [10]`** → 계정 동시 실행 한도가 낮은
   새 계정이다. 이미 `serverless.yml`에서 `reservedConcurrency` 대신 SQS 이벤트의
-  `maximumConcurrency`를 쓰도록 고쳐놓았으니 지금 코드엔 안 난다. 혹시 또 나오면 그건
+  `maximumConcurrency`를 쓰도록 고쳐놨으니 지금 코드에선 안 난다. 혹시 또 나오면 그건
   어딘가에 `reservedConcurrency`가 다시 들어간 것 — 지우면 된다
 - **GitHub 403(rate limit)** → `.env`의 `GITHUB_TOKEN=`에 읽기 전용 PAT를 채우고 재배포. 공개 repo면 fine-grained PAT의 "Public Repositories (read-only)"로 충분
 - **싹 삭제** → `npx serverless remove`

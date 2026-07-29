@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -154,6 +155,15 @@ func (a *app) gateway(ctx context.Context, req events.APIGatewayV2HTTPRequest) (
 		User:     ev.User,
 		Text:     strings.TrimSpace(mentionRe.ReplaceAllString(ev.Text, "")),
 	}
+	// 고르기만 한다. 바이트를 받아오는 건 워커 일이다 — 여기서 파일을 내려받으면
+	// 슬랙의 3초 ack를 놓치고, 놓치면 같은 이벤트가 세 번 온다.
+	if len(ev.Files) > 0 {
+		cand := make([]jobs.File, 0, len(ev.Files))
+		for _, f := range ev.Files {
+			cand = append(cand, jobs.File{Name: f.Name, URL: f.URLPrivate, Size: f.Size})
+		}
+		job.File, job.Ignored = jobs.Pick(cand)
+	}
 
 	if a.queueOn {
 		if payload, err := job.Encode(); err != nil {
@@ -204,7 +214,30 @@ func (a *app) reply(ctx context.Context, job jobs.Job) {
 		log.Printf("slack status: %v", err)
 	}
 
-	msg, tool := a.answer(ctx, job.Text)
+	// 바이트는 여기서 받는다. 게이트웨이는 3초 안에 ack해야 해서 파일 하나 받아오는 데
+	// 그 시간을 쓸 수 없고, 워커는 300초를 쥐고 있다.
+	ask := brain.Ask{Text: job.Text}
+	if job.File != nil {
+		b, err := a.slack.Download(ctx, job.File.URL, jobs.MaxBytes)
+		if err != nil {
+			// 모델을 부르지 않고 여기서 끝낸다. 파일을 못 읽은 채로 넘기면 봇은 첨부가
+			// 없었던 걸로 알고 답하고, 그는 자기 초안이 어디로 갔는지 모르게 된다.
+			log.Printf("worker: download %s: %v", job.File.Name, err)
+			if err := a.slack.PostThread(job.Channel, job.ThreadTS,
+				"첨부한 `"+job.File.Name+"`을 못 읽었어요.\n"+err.Error()); err != nil {
+				log.Printf("slack post: %v", err)
+			}
+			audit.Log(audit.Entry{
+				UserID: job.User, ChannelID: job.Channel, Tool: "download",
+				Allowed: true, Success: false, LatencyMs: time.Since(start).Milliseconds(),
+			})
+			return
+		}
+		ask.File = &brain.Attached{Name: job.File.Name, Content: string(b)}
+	}
+
+	msg, tool := a.answer(ctx, ask)
+	msg += tail(job, ask.File)
 
 	success := true
 	if err := a.slack.PostThread(job.Channel, job.ThreadTS, msg); err != nil {
@@ -217,9 +250,40 @@ func (a *app) reply(ctx context.Context, job jobs.Job) {
 	})
 }
 
-func (a *app) answer(ctx context.Context, query string) (msg, tool string) {
-	if a.brainOn && query != "" {
-		ans, err := a.brain.Answer(ctx, query)
+// tail is what the worker says on its own, under the model's answer.
+//
+// 모델에게 안 맡기는 이유: 이 둘은 판단이 아니라 사실이고, 사실은 매번 똑같이 나와야
+// 한다. 모델을 거치면 개수를 틀리거나 답이 길다고 빼먹는 날이 생기는데, 그러면 그가
+// 던진 파일이 왜 무시됐는지는 영영 아무도 말해주지 않는다.
+//
+// PR이 안 열려도 들린다는 게 핵심이다. 초안만 던져 추천만 받는 자리에서도 `[[위키링크]]`가
+// 몇 개인지는 알아야 하고, 그건 PR 본문만으로는 닿지 않는 자리다.
+func tail(job jobs.Job, att *brain.Attached) string {
+	var lines []string
+	if len(job.Ignored) > 0 {
+		lines = append(lines, "*안 읽은 첨부*")
+		for _, s := range job.Ignored {
+			lines = append(lines, "• "+s)
+		}
+	}
+	if att != nil {
+		if r := att.Check(); !r.OK() {
+			lines = append(lines, "*옵시디언에서만 되는 문법이 "+strconv.Itoa(r.Total())+"개* — 고치지 않고 그대로 뒀어요")
+			for _, s := range r.Lines() {
+				lines = append(lines, "• "+s)
+			}
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "\n\n" + strings.Join(lines, "\n")
+}
+
+func (a *app) answer(ctx context.Context, ask brain.Ask) (msg, tool string) {
+	// 파일만 던지고 아무 말도 안 붙였을 수 있다. 그때도 물어볼 게 있는 요청이다.
+	if a.brainOn && (ask.Text != "" || ask.File != nil) {
+		ans, err := a.brain.Run(ctx, ask)
 		if err == nil {
 			log.Printf("brain: turns=%d in=%d out=%d tools=%v",
 				ans.Turns, ans.InputTokens, ans.OutputTokens, ans.ToolsUsed)
@@ -227,7 +291,19 @@ func (a *app) answer(ctx context.Context, query string) (msg, tool string) {
 		}
 		log.Printf("brain: %v — falling back to keyword search", err)
 	}
-	return a.keywordAnswer(ctx, query)
+	// 파일을 받아 놓고 여기까지 왔다면 자리 추천도 PR도 못 한다 — 둘 다 모델의 일이다.
+	// 그래도 하나는 남는다: 같은 주제 노트가 이미 있나 찾아보는 것. 이 봇을 만든 첫
+	// 번째 이유고, 검색은 모델 없이도 된다. 그가 슬랙에 친 말은 "이거 올려줘" 한 줄일
+	// 수 있으니 검색어는 파일에서 뽑는다.
+	//
+	// 잠자코 위키 현황만 뱉으면 그는 초안이 접수된 줄 안다. 그래서 못 했다는 말이
+	// 먼저 나온다.
+	if ask.File != nil {
+		msg, tool = a.keywordAnswer(ctx, ask.File.Topic())
+		return "지금은 자리 추천을 못 해요 — 모델을 못 불렀어요. 대신 같은 주제 노트가 " +
+			"있는지만 찾아봤어요. 잠시 뒤에 파일을 다시 올려주세요.\n\n" + msg, tool
+	}
+	return a.keywordAnswer(ctx, ask.Text)
 }
 
 // keywordAnswer is the 1차 behaviour, kept as the safety net for when the LLM
