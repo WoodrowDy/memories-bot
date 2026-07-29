@@ -40,7 +40,7 @@ type fakeWiki struct {
 func (f *fakeWiki) Search(_ context.Context, q string) ([]wiki.Match, error) {
 	f.searched = append(f.searched, q)
 	return []wiki.Match{{
-		Path: "topics/cs/concurrency.md", Title: "동시성", Status: "budding",
+		Path: "topics/cs/concurrency.md", Title: "동시성", Status: "growing",
 		Snippet: "고루틴과 채널", URL: "https://github.com/x/y/blob/main/topics/cs/concurrency.md",
 	}}, nil
 }
@@ -201,7 +201,7 @@ func TestReadNoteTruncatesLongBodies(t *testing.T) {
 	}}
 	b := New(&fakeLLM{}, w, "m", "o", "r")
 
-	out, err := b.runTool(context.Background(), "read_note", json.RawMessage(`{"path":"topics/cs/x.md"}`))
+	out, err := b.runTool(context.Background(), "read_note", json.RawMessage(`{"path":"topics/cs/x.md"}`), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,5 +214,37 @@ func TestReadNoteTruncatesLongBodies(t *testing.T) {
 	}
 	if n := len([]rune(got.Body)); n != noteBodyLimit {
 		t.Errorf("body = %d runes, want %d", n, noteBodyLimit)
+	}
+}
+
+// ---- Slack's mrkdwn bolds with one asterisk, not two ----
+
+func TestSlackBoldCollapsesMarkdownBoldButLeavesArithmeticAlone(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"**핵심**을 보자", "*핵심*을 보자"},
+		{"**counting bloom filter**로 해결", "*counting bloom filter*로 해결"},
+		{"**a**", "*a*"},
+		{"**여러 개**와 **또 하나**", "*여러 개*와 *또 하나*"},
+		{"이미 *한 개*면 그대로", "이미 *한 개*면 그대로"},
+		{"2 ** 8 ** 3", "2 ** 8 ** 3"}, // an operator has air on both sides; a bold marker hugs its word
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := slackBold(c.in); got != c.want {
+			t.Errorf("slackBold(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestAnswerFixesSlackBoldOnTheWayOut(t *testing.T) {
+	f := &fakeLLM{script: []llm.Response{finalText("**정리했어요** — topics/cs/grpc.md")}}
+	b := New(f, &fakeWiki{}, "m", "o", "r")
+
+	ans, err := b.Answer(context.Background(), "정리해줘")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ans.Text != "*정리했어요* — topics/cs/grpc.md" {
+		t.Errorf("double asterisks reached Slack: %q", ans.Text)
 	}
 }

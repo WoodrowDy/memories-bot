@@ -10,6 +10,8 @@ func TestIsNotePath(t *testing.T) {
 		"daily/2026-07-22.md",
 		"personal/reading.md",
 		"projects/wiki-assistant.md",
+		"docs/note-style.md", // rule doc: readable so the bot can tidy to spec
+		"CONVENTIONS.md",     // rule doc, at the repo root
 	}
 	for _, p := range allowed {
 		if !IsNotePath(p) {
@@ -20,6 +22,9 @@ func TestIsNotePath(t *testing.T) {
 	rejected := []string{
 		"",
 		"README.md",                      // outside the content dirs
+		"docs/obsidian.md",               // docs/ is not open — only the listed rule docs
+		"docs/note-style.md.bak.md",      // near-miss on a rule doc
+		"CONVENTIONS.md.md",              // near-miss on a rule doc
 		".env",                           // not a note at all
 		"topics/../../etc/passwd",        // traversal
 		"topics/cs/../../../secrets.md",  // traversal that ends in .md
@@ -33,6 +38,20 @@ func TestIsNotePath(t *testing.T) {
 	for _, p := range rejected {
 		if IsNotePath(p) {
 			t.Errorf("IsNotePath(%q) = true, want false", p)
+		}
+	}
+}
+
+// The rule docs are readable but must never enter the search index — otherwise
+// "무슨 주제 정리해놨지?" would answer with the wiki's own style guide.
+// listNotePaths filters on underContent, so that is the function under test.
+func TestRuleDocsAreReadableButNotIndexed(t *testing.T) {
+	for p := range ruleDocs {
+		if !IsNotePath(p) {
+			t.Errorf("rule doc %q should be readable", p)
+		}
+		if underContent(p) {
+			t.Errorf("rule doc %q leaked into the index filter", p)
 		}
 	}
 }

@@ -10,7 +10,9 @@
 // the same answer three times.
 //
 // The LLM is optional: with no ANTHROPIC_API_KEY (or if the API fails) the bot
-// falls back to the 1차 keyword search rather than going silent.
+// falls back to the 1차 keyword search rather than going silent. Writing is
+// optional in the same way: with no GITHUB_WRITE_TOKEN the bot answers
+// questions and never offers to open a PR.
 package main
 
 import (
@@ -37,6 +39,7 @@ import (
 	"github.com/WoodrowDy/memories-wiki-bot/internal/slackclient"
 	"github.com/WoodrowDy/memories-wiki-bot/internal/slackevents"
 	"github.com/WoodrowDy/memories-wiki-bot/internal/wiki"
+	"github.com/WoodrowDy/memories-wiki-bot/internal/wikiwrite"
 )
 
 type app struct {
@@ -47,6 +50,7 @@ type app struct {
 	brain         *brain.Brain
 	brainOn       bool
 	queueOn       bool
+	writeOn       bool
 }
 
 func main() {
@@ -55,16 +59,29 @@ func main() {
 	model := llm.New(os.Getenv("ANTHROPIC_API_KEY"), 60*time.Second)
 	queueURL := os.Getenv("JOBS_QUEUE_URL")
 
+	// The write client is built here and nowhere else. It holds the only copy of
+	// the write token, and the read client above never sees it.
+	writer := wikiwrite.New(wikiwrite.Config{
+		Owner: c.Owner, Repo: c.Repo, Base: c.Branch, Token: c.WriteToken,
+	})
+
+	b := brain.New(model, w, os.Getenv("LLM_MODEL"), c.Owner, c.Repo)
+	if writer.Enabled() {
+		b = b.WithWriter(writer)
+	}
+
 	a := &app{
 		signingSecret: os.Getenv("SLACK_SIGNING_SECRET"),
 		slack:         slackclient.New(os.Getenv("SLACK_BOT_TOKEN"), 8*time.Second),
 		wiki:          w,
 		queue:         queue.New(queueURL),
-		brain:         brain.New(model, w, os.Getenv("LLM_MODEL"), c.Owner, c.Repo),
+		brain:         b,
 		brainOn:       model.Enabled(),
 		queueOn:       queueURL != "",
+		writeOn:       writer.Enabled(),
 	}
-	log.Printf("boot: brain=%v queue=%v model=%s", a.brainOn, a.queueOn, envOr("LLM_MODEL", llm.DefaultModel))
+	log.Printf("boot: brain=%v queue=%v write=%v model=%s",
+		a.brainOn, a.queueOn, a.writeOn, envOr("LLM_MODEL", llm.DefaultModel))
 	lambda.Start(a.route)
 }
 
@@ -169,8 +186,24 @@ func (a *app) work(ctx context.Context, ev events.SQSEvent) error {
 	return nil
 }
 
+// thinkingStatus is what the thread shows while the model runs. 슬랙이 봇 이름 뒤에
+// 붙여 회색으로 띄운다 — 디엠의 "입력 중…"이 있는 그 자리다.
+const thinkingStatus = "답을 쓰는 중…"
+
 func (a *app) reply(ctx context.Context, job jobs.Job) {
 	start := time.Now()
+
+	// 멘션과 답 사이가 5~20초다. 그동안 슬랙으로 나가는 게 하나도 없으면 그가 보기엔
+	// 봇이 죽은 거랑 구별이 안 된다. 답을 올리는 순간 슬랙이 이 표시를 알아서 지운다.
+	//
+	// answer보다 먼저, 그리고 동기로 부른다. 뒤에 부르면 지워줄 답이 이미 지나가서
+	// 표시가 2분을 꽉 채우고, 고루틴으로 띄우면 그 순서가 안 지켜진다.
+	//
+	// 실패는 로그만 남긴다. 진행 표시 하나 때문에 답을 못 주면 본말이 뒤집힌다.
+	if err := a.slack.SetStatus(job.Channel, job.ThreadTS, thinkingStatus); err != nil {
+		log.Printf("slack status: %v", err)
+	}
+
 	msg, tool := a.answer(ctx, job.Text)
 
 	success := true

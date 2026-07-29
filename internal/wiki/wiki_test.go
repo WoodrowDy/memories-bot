@@ -1,6 +1,9 @@
 package wiki
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 const concurrencyNote = `---
 title: 동시성 vs 병렬성
@@ -54,5 +57,37 @@ func TestCandidatesStripParticle(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected '동시성' among candidates")
+	}
+}
+
+// Body drops the frontmatter, so the model never sees it. Frontmatter keeps it
+// verbatim, which is the only reason the write path can put it back on a file
+// the model rewrote whole (a category README).
+func TestParseNoteKeepsTheRawFrontmatterAndTheBodyWithoutIt(t *testing.T) {
+	n := parseNote("topics/cs/concurrency-vs-parallelism.md", concurrencyNote)
+
+	if !strings.HasPrefix(n.Frontmatter, "---\ntitle: 동시성 vs 병렬성\n") {
+		t.Errorf("frontmatter did not start at the opening delimiter:\n%s", n.Frontmatter)
+	}
+	if !strings.HasSuffix(n.Frontmatter, "status: growing\n---") {
+		t.Errorf("frontmatter did not end at the closing delimiter:\n%s", n.Frontmatter)
+	}
+	if strings.Contains(n.Body, "status: growing") {
+		t.Errorf("body still carries frontmatter:\n%s", n.Body)
+	}
+	// The two halves must reassemble into the original file byte for byte.
+	if n.Frontmatter+n.Body != concurrencyNote {
+		t.Error("frontmatter + body != the original note")
+	}
+}
+
+// A file with no frontmatter leaves the field empty rather than guessing.
+func TestParseNoteLeavesFrontmatterEmptyWhenThereIsNone(t *testing.T) {
+	n := parseNote("topics/cs/README.md", "# CS\n\n- [gRPC](grpc.md)\n")
+	if n.Frontmatter != "" {
+		t.Errorf("invented frontmatter: %q", n.Frontmatter)
+	}
+	if n.Body != "# CS\n\n- [gRPC](grpc.md)\n" {
+		t.Errorf("body = %q", n.Body)
 	}
 }

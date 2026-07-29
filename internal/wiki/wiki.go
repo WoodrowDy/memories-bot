@@ -53,9 +53,19 @@ type Note struct {
 	Path    string
 	Title   string
 	Status  string
+	Created string // kept so an edit can preserve it; the wiki writes YYYY-MM-DD
 	Tags    []string
 	Aliases []string
-	Body    string
+	Body    string // frontmatter removed — this is what read_note shows the model
+
+	// Frontmatter is the raw "---\n…\n---" block, verbatim and unparsed.
+	//
+	// Body deliberately excludes it, which means the model is never shown it. So
+	// a model asked to rewrite a whole file — a category README's table of
+	// contents — hands back a file with no frontmatter at all, and writing that
+	// as-is deletes the block. Keeping the original here lets the write path put
+	// it back. Empty when the file had none.
+	Frontmatter string
 }
 
 // Match is a search hit, structured data only (rendering is the render pkg's job).
@@ -163,10 +173,39 @@ func (c *Client) ReadNote(ctx context.Context, path string) (Note, error) {
 	return parseNote(path, raw), nil
 }
 
+// ruleDocs are the wiki's own writing rules. The bot has to read them before
+// it can tidy a draft into a note, but they are not study notes — so they are
+// readable without being indexed (see listNotePaths, which uses underContent).
+//
+// Exact paths, deliberately not a prefix: "docs/" must not become an open door,
+// and a root-level allowance by prefix would be no allowance at all.
+var ruleDocs = map[string]bool{
+	"docs/note-style.md": true,
+	"CONVENTIONS.md":     true,
+}
+
 // IsNotePath reports whether p is a path this bot is allowed to read: a .md
-// file under one of the wiki's content directories, with no traversal or
-// absolute/scheme trickery.
+// file under one of the wiki's content directories (or one of the rule docs
+// above), with no traversal or absolute/scheme trickery.
 func IsNotePath(p string) bool {
+	if p == "" || len(p) > 300 {
+		return false
+	}
+	if strings.HasPrefix(p, "/") || strings.Contains(p, "..") ||
+		strings.Contains(p, "://") || strings.ContainsAny(p, "\\\x00") {
+		return false
+	}
+	return strings.HasSuffix(p, ".md") && (underContent(p) || ruleDocs[p])
+}
+
+// IsWritablePath reports whether the bot may propose a change to p.
+//
+// Deliberately not the same set as IsNotePath. The rule docs (CONVENTIONS.md,
+// docs/note-style.md) are readable so the bot can tidy a draft to spec, but not
+// writable — it does not get to rewrite the rules it is being held to. README.md
+// inside a content directory *is* writable, so the bot can keep the MOCs current
+// in the same PR that adds a note.
+func IsWritablePath(p string) bool {
 	if p == "" || len(p) > 300 {
 		return false
 	}
@@ -319,8 +358,10 @@ func parseNote(path, raw string) Note {
 		block := m[1]
 		n.Title = fmScalar(block, "title")
 		n.Status = fmScalar(block, "status")
+		n.Created = fmScalar(block, "created")
 		n.Tags = fmList(block, "tags")
 		n.Aliases = fmList(block, "aliases")
+		n.Frontmatter = raw[:len(m[0])] // "---\n…\n---", no trailing newline
 		n.Body = raw[len(m[0]):]
 	}
 	if n.Title == "" {

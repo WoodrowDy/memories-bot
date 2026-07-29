@@ -25,6 +25,10 @@ provider:
     WIKI_REPO: ${env:WIKI_REPO, 'memories'}
     WIKI_BRANCH: ${env:WIKI_BRANCH, 'main'}
     GITHUB_TOKEN: ${env:GITHUB_TOKEN, ''}
+    # 읽기 토큰과 별개인 쓰기 전용 토큰. 비어 있으면 봇은 PR을 못 열고 질문에만
+    # 답한다 — 그것도 정상 상태다. 코드에서도 이 값이 비면 propose_note 툴 자체를
+    # 모델에게 주지 않는다.
+    GITHUB_WRITE_TOKEN: ${env:GITHUB_WRITE_TOKEN, ''}
     # 비어 있으면 봇은 1차 키워드 검색으로 동작한다. 배포는 그대로 된다.
     ANTHROPIC_API_KEY: ${env:ANTHROPIC_API_KEY, ''}
     LLM_MODEL: ${env:LLM_MODEL, 'claude-haiku-4-5'}
@@ -59,7 +63,10 @@ functions:
 
   worker:
     handler: bootstrap
-    timeout: 60
+    # 정리 모드는 한 번에 여러 턴을 돈다: 검색 → 규칙 문서 2개 → 카테고리 목차 →
+    # 기존 노트 → PR. 초안이 길면 턴마다 그게 다시 실려 가서 60초로는 모자란다.
+    # 타임아웃은 상한일 뿐이라 짧은 질문의 비용은 그대로다.
+    timeout: 300
     memorySize: 512
     events:
       - sqs:
@@ -81,8 +88,8 @@ resources:
       Type: AWS::SQS::Queue
       Properties:
         QueueName: ${self:service}-${self:provider.stage}-jobs
-        # 워커 타임아웃(60초)의 6배 — AWS 권장치.
-        VisibilityTimeout: 360
+        # 워커 타임아웃(300초)의 6배 — AWS 권장치.
+        VisibilityTimeout: 1800
         # 한 시간 지난 질문에 이제 와서 답하는 건 안 하느니만 못하다.
         MessageRetentionPeriod: 3600
         RedrivePolicy:
