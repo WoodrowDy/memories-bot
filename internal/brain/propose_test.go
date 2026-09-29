@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/WoodrowDy/memories-wiki-bot/internal/llm"
 	"github.com/WoodrowDy/memories-wiki-bot/internal/wiki"
 	"github.com/WoodrowDy/memories-wiki-bot/internal/wikiwrite"
 )
@@ -74,22 +77,35 @@ const goDraft = draft + "\n\n올려줘"
 
 // ---- the tool only exists when writing is on ----
 
+// 개수가 아니라 이름으로 본다. 읽기 툴이 하나 늘 때마다 숫자를 고쳐야 하면 그 숫자는
+// 지키려는 것을 지키지 못한다 — 여기서 지키려는 건 "쓰기 툴은 쓰기가 켜졌을 때만
+// 나온다" 하나뿐이다. preview_note는 아무것도 쓰지 않으니 읽기 쪽이 맞다.
 func TestProposeToolIsOfferedOnlyWhenWritingIsOn(t *testing.T) {
 	read := New(&fakeLLM{}, &fakeWiki{}, "m", "o", "r")
-	if got := len(read.toolDefs()); got != 4 {
-		t.Errorf("read-only brain offered %d tools, want 4", got)
+	if names := toolNames(read.toolDefs()); slices.Contains(names, "propose_note") {
+		t.Errorf("read-only brain offered propose_note: %v", names)
+	} else if !slices.Contains(names, "preview_note") {
+		t.Errorf("preview_note는 쓰기가 꺼져도 있어야 한다 (확인 답이 그것뿐이다): %v", names)
 	}
 
 	off := New(&fakeLLM{}, &fakeWiki{}, "m", "o", "r").WithWriter(&fakeWriter{on: false})
-	if got := len(off.toolDefs()); got != 4 {
-		t.Errorf("brain with a tokenless writer offered %d tools, want 4", got)
+	if names := toolNames(off.toolDefs()); slices.Contains(names, "propose_note") {
+		t.Errorf("brain with a tokenless writer offered propose_note: %v", names)
 	}
 
 	on, _ := writingBrain(nil)
 	defs := on.toolDefs()
-	if len(defs) != 5 || defs[4].Name != "propose_note" {
-		t.Fatalf("writing brain tools = %d, last = %q", len(defs), defs[len(defs)-1].Name)
+	if len(defs) != len(on.readTools())+1 || defs[len(defs)-1].Name != "propose_note" {
+		t.Fatalf("writing brain tools = %v", toolNames(defs))
 	}
+}
+
+func toolNames(defs []llm.Tool) []string {
+	out := make([]string, len(defs))
+	for i, d := range defs {
+		out[i] = d.Name
+	}
+	return out
 }
 
 // A model can invent a tool call the schema never offered it. The refusal has
@@ -883,8 +899,8 @@ func TestAFencedDraftIsFiledVerbatim(t *testing.T) {
 	}
 }
 
-// The default is a recommendation. A draft on its own must not open a PR, and
-// the refusal has to happen in code — a prompt is not a rule.
+// The default is the 확인 round. A draft on its own must not open a PR, and the
+// refusal has to happen in code — a prompt is not a rule.
 func TestProposeIsRefusedUntilHeSaysSo(t *testing.T) {
 	b, w := writingBrain(nil)
 
@@ -892,8 +908,12 @@ func TestProposeIsRefusedUntilHeSaysSo(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a bare draft opened a PR: %s", out)
 	}
-	if !strings.Contains(err.Error(), "만들라는 말이 없어서") {
-		t.Errorf("the refusal should send the model back to recommending, got %v", err)
+	// 거절은 모델을 확인 라운드로 돌려보내는 것으로 끝나선 안 된다. 그가 다음에 칠
+	// 낱말이 그 답에 적혀 있어야 PR까지 한 번에 간다.
+	for _, want := range []string{"올리라는 말이 없어서", "확인만 해주세요", "올려줘"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("거절 문구에 %q가 없다: %v", want, err)
+		}
 	}
 	if len(w.got) != 0 {
 		t.Errorf("writer was called %d times with no go-ahead", len(w.got))
@@ -1083,5 +1103,190 @@ func TestBumpUpdatedTouchesOnlyThatLine(t *testing.T) {
 	bare := "---\ntitle: CS MOC\ntags: [moc]\n---"
 	if got := bumpUpdated(bare, "2026-07-22"); got != bare {
 		t.Errorf("bumpUpdated added a field that was not there: %q", got)
+	}
+}
+
+// ---- `also`에서 사라진 줄은 PR 본문에 적힌다 ----
+
+// csMOC is topics/cs/README.md as it stood on main the day PR #4 was opened:
+// a table of contents, then a "작성 예정" section with two entries.
+func csMOC() map[string]wiki.Note {
+	return map[string]wiki.Note{
+		"topics/cs/README.md": {
+			Path:        "topics/cs/README.md",
+			Title:       "CS MOC",
+			Frontmatter: "---\ntitle: CS MOC\ncreated: 2026-05-29\nupdated: 2026-07-30\ntags: [moc, cs]\n---",
+			Body: "\n\n# CS (백엔드 기초)\n\n- [HTTP/2](http2.md)\n- [GoF 디자인 패턴](gof-design-patterns.md)\n" +
+				"\n## 작성 예정\n\n- 자료구조 / 알고리즘\n- 레이어드 아키텍처\n",
+		},
+	}
+}
+
+// PR #4 그 자체다. 프롬프트는 "이번 주제 줄만 지워"라고 했고 모델은 그 줄이 있던 섹션을
+// 통째로 지웠다 — `자료구조 / 알고리즘`이 목차에서 사라졌는데 PR 본문은 그 얘기를 한 줄도
+// 하지 않았다. 더한 줄과 지운 줄이 나란히 있는 diff에서 눈은 더한 쪽만 읽는다.
+//
+// 그 뒤로 위키에서 "작성 예정" 섹션은 없앴고 프롬프트는 더하기만 허락한다. 그래도 이
+// 테스트는 남는다 — 프롬프트는 지켜지지 않을 수 있고, 그때 경보가 울리는지가 여기서
+// 확인하는 것이다. 막지는 않는다. 코드가 사람의 편집을 거절하기 시작하면 봇이 우회당한다.
+// 무엇이 사라졌는지만 머지 직전에 보이게 한다.
+func TestAlsoReportsTheLinesTheRewriteDropped(t *testing.T) {
+	b, w := writingBrain(csMOC())
+
+	in := `{
+	  "path": "topics/cs/layered-architecture.md", "mode": "create",
+	  "title": "레이어드 아키텍처", "status": "seedling", "tags": ["cs/architecture"],
+	  "summary": "cs에 새 노트로 넣었어요.",
+	  "also": [{
+	    "path": "topics/cs/README.md",
+	    "content": "# CS (백엔드 기초)\n\n- [HTTP/2](http2.md)\n- [GoF 디자인 패턴](gof-design-patterns.md)\n- [레이어드 아키텍처](layered-architecture.md)\n",
+	    "why": "목차에 링크 추가"
+	  }]
+	}`
+	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(in), Ask{Text: goDraft}); err != nil {
+		t.Fatal(err)
+	}
+	body := w.got[0].Body
+
+	if !strings.Contains(body, "> [!WARNING]") || !strings.Contains(body, "`topics/cs/README.md`에서") {
+		t.Fatalf("사라진 줄에 대한 경고가 없다:\n%s", body)
+	}
+	// 잘못 사라진 줄. 이 줄이 본문에 없으면 그는 머지하고 나서야 안다.
+	if !strings.Contains(body, "자료구조 / 알고리즘") {
+		t.Errorf("PR #4에서 잃은 그 줄이 보고되지 않았다:\n%s", body)
+	}
+	// 섹션 제목까지 갔다는 사실도 그가 봐야 하는 것이다 — 남은 항목이 갈 곳이 없어진다.
+	if !strings.Contains(body, "작성 예정") {
+		t.Errorf("섹션 제목이 사라진 것이 보고되지 않았다:\n%s", body)
+	}
+	// 어떤 삭제든 똑같이 적는다. 무엇이 옳은 삭제인지 코드가 판단하지 않는다.
+	if !strings.Contains(body, "- 레이어드 아키텍처") {
+		t.Errorf("이번 주제 줄도 사라진 줄로 적혀야 한다:\n%s", body)
+	}
+	// 보고지 거부가 아니다. PR은 열린다.
+	if len(w.got[0].Files) != 2 {
+		t.Errorf("파일이 %d개 — 경고 때문에 PR을 막으면 목차가 낡는다", len(w.got[0].Files))
+	}
+}
+
+// 경고가 매번 뜨면 아무도 읽지 않는다. 줄만 더한 정상 편집에는 한 글자도 붙지 않아야 한다.
+func TestAlsoSaysNothingWhenTheRewriteOnlyAdded(t *testing.T) {
+	b, w := writingBrain(map[string]wiki.Note{
+		"topics/cs/README.md": {
+			Path:        "topics/cs/README.md",
+			Frontmatter: "---\ntitle: CS MOC\nupdated: 2026-07-30\n---",
+			Body:        "\n\n# CS (백엔드 기초)\n\n- [HTTP/2](http2.md)\n",
+		},
+	})
+
+	in := `{
+	  "path": "topics/cs/grpc.md", "mode": "create", "title": "gRPC", "status": "seedling",
+	  "tags": ["cs/grpc"], "summary": "새 노트로 넣었어요.",
+	  "also": [{
+	    "path": "topics/cs/README.md",
+	    "content": "# CS (백엔드 기초)\n\n- [HTTP/2](http2.md)\n- [gRPC](grpc.md)\n",
+	    "why": "목차에 링크 추가"
+	  }]
+	}`
+	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(in), Ask{Text: goDraft}); err != nil {
+		t.Fatal(err)
+	}
+	if body := w.got[0].Body; strings.Contains(body, "사라졌습니다") {
+		t.Errorf("더하기만 한 편집에 경고가 붙었다 — 매번 뜨는 경고는 안 읽힌다:\n%s", body)
+	}
+}
+
+// 새로 만드는 파일에는 잃을 것이 없다. 여기서 경고가 뜨면 새 카테고리 README를 만들 때마다
+// 전체 내용이 "사라진 줄"로 올라온다.
+func TestAlsoOnABrandNewFileReportsNothing(t *testing.T) {
+	b, w := writingBrain(nil)
+
+	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(goodPropose), Ask{Text: goDraft}); err != nil {
+		t.Fatal(err)
+	}
+	if body := w.got[0].Body; strings.Contains(body, "사라졌습니다") {
+		t.Errorf("없던 파일에 대해 사라진 줄을 보고했다:\n%s", body)
+	}
+}
+
+// 목차를 다시 쓴 것에 가까운 편집은 줄을 하나하나 읽을 일이 아니다. 여덟 줄까지 보이고
+// 나머지는 몇 줄인지만 알려준 뒤 diff로 보낸다.
+func TestPRBodyCapsHowManyDroppedLinesItQuotes(t *testing.T) {
+	var old strings.Builder
+	old.WriteString("\n\n# CS\n\n")
+	for i := 0; i < maxDroppedLines+3; i++ {
+		fmt.Fprintf(&old, "- 항목 %d\n", i)
+	}
+	b, w := writingBrain(map[string]wiki.Note{
+		"topics/cs/README.md": {
+			Path:        "topics/cs/README.md",
+			Frontmatter: "---\ntitle: CS MOC\nupdated: 2026-07-30\n---",
+			Body:        old.String(),
+		},
+	})
+
+	in := `{
+	  "path": "topics/cs/grpc.md", "mode": "create", "title": "gRPC", "status": "seedling",
+	  "tags": ["cs/grpc"], "summary": "새 노트로 넣었어요.",
+	  "also": [{"path": "topics/cs/README.md", "content": "# CS\n\n- [gRPC](grpc.md)\n"}]
+	}`
+	if _, err := b.runTool(context.Background(), "propose_note", json.RawMessage(in), Ask{Text: goDraft}); err != nil {
+		t.Fatal(err)
+	}
+	body := w.got[0].Body
+
+	if n := strings.Count(body, "> - "); n != maxDroppedLines+1 {
+		t.Errorf("인용한 줄 %d개, want %d개 + 요약 한 줄:\n%s", n, maxDroppedLines, body)
+	}
+	if !strings.Contains(body, "…외 3줄") {
+		t.Errorf("남은 줄 수를 알려주지 않았다:\n%s", body)
+	}
+	// 개수는 자른 뒤가 아니라 사라진 전체다. 여기서 8이 찍히면 그는 다 봤다고 믿는다.
+	if !strings.Contains(body, "11줄이 사라졌습니다") {
+		t.Errorf("사라진 줄 수가 잘린 개수로 적혔다:\n%s", body)
+	}
+}
+
+// 줄 단위 집합 비교다. 자리만 바뀐 줄은 지운 게 아니고, 중복이 하나로 줄어든 것도 아니다 —
+// 둘 다 경고로 올리면 정작 봐야 할 줄이 묻힌다.
+func TestDroppedLinesCountsOnlyWhatIsGone(t *testing.T) {
+	cases := []struct {
+		name     string
+		old, new string
+		want     []string
+	}{
+		{"순서만 바뀜", "- a\n- b\n- c\n", "- c\n- a\n- b\n", nil},
+		{"빈 줄 차이", "- a\n\n\n- b\n", "- a\n- b\n", nil},
+		{"들여쓰기만 다름", "  - a\n", "- a\n", nil},
+		{"중복이 하나로", "- a\n- a\n- b\n", "- a\n- b\n", nil},
+		{"한 줄 사라짐", "- a\n- b\n", "- a\n", []string{"- b"}},
+		{"섹션째 사라짐", "- a\n\n## 작성 예정\n\n- b\n", "- a\n", []string{"## 작성 예정", "- b"}},
+		{"같은 줄 두 번 사라져도 한 번만", "- a\n- a\n", "", []string{"- a"}},
+		{"전부 새로 쓰임", "- a\n", "- z\n", []string{"- a"}},
+	}
+	for _, c := range cases {
+		got := droppedLines(c.old, c.new)
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: droppedLines = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// 목차 줄에는 백틱이 흔하다. 경고 블록 안에서 백틱 하나가 짝을 잃으면 그 뒤가 통째로
+// 코드로 먹히고, 보여주려던 줄이 오히려 안 보인다.
+func TestCodeSpanSurvivesBackticksInsideTheLine(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"- 자료구조 / 알고리즘", "`- 자료구조 / 알고리즘`"},
+		{"- `.proto` 파일 구조", "``- `.proto` 파일 구조``"},
+		// 울타리는 안에 있는 가장 긴 백틱 줄보다 하나만 길면 된다. 짝이 되는 것은 길이가
+		// 정확히 같은 줄뿐이라서, 3개짜리 울타리 안에 2개짜리는 그대로 살아 있는다.
+		{"``a``", "``` ``a`` ```"},
+		// 백틱으로 시작하거나 끝나면 공백 한 칸씩 넣는다. 렌더링에서 그 한 칸은 없어진다.
+		{"`", "`` ` ``"},
+	}
+	for _, c := range cases {
+		if got := codeSpan(c.in); got != c.want {
+			t.Errorf("codeSpan(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

@@ -62,74 +62,94 @@ func proposeToolDef() llm.Tool {
 	return llm.Tool{
 		Name: "propose_note",
 		Description: "정리한 노트를 브랜치에 올리고 PR을 연다. 머지는 사람이 하므로 이 툴은 위키를 바로 바꾸지 않는다. " +
-			"**우드로가 만들라고 했을 때만 부른다** — \"만들어라\", \"올려줘\", \"넣어줘\", \"PR\", \"ㄱㄱ\", \"그래\" 같은 말이 " +
+			"**우드로가 올리라고 했을 때만 부른다** — \"올려줘\", \"만들어라\", \"넣어줘\", \"PR\", \"ㄱㄱ\", \"그래\" 같은 말이 " +
 			"초안과 함께 오지 않았으면 이 툴은 코드에서 거부된다. " +
-			"초안만 왔을 땐 자리·프론트매터·status를 슬랙으로 추천하고 멈춰라. " +
+			"거꾸로 그 말이 왔으면 **반드시 불러라** — 첫 메시지 끝의 \"[코드 판정: 올리는 모드]\"가 그 신호이고, " +
+			"그때 추천만 하고 끝내면 그는 아무것도 받지 못한다. " +
+			"\"확인\"처럼 올리라는 말이 없을 땐 자리·프론트매터·status만 슬랙으로 알려주고 멈춰라. " +
 			"초안 맨 위에 ---로 감싼 프론트매터가 붙어 있으면 우드로가 정해준 값이니 그대로 옮겨 담아라. " +
 			"본문은 네가 쓰지 않는다 — 우드로가 보낸 원문이 그대로 본문이 되고, 이 툴에는 body 칸이 없다. " +
 			"네가 정하는 건 어디에 둘지(path·mode)와 어떻게 분류할지(title·status·tags·aliases)뿐이다. " +
 			"부르기 전에 반드시 search_wiki로 같은 주제 노트가 있는지 확인하고, " +
 			"topics/README.md와 CONVENTIONS.md를 read_note로 읽어 카테고리를 골라라.",
 		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"path": map[string]any{
-					"type": "string",
-					"description": "노트 경로. 새 노트는 영문 kebab-case (예: 'topics/cs/grpc.md'). " +
-						"한글·공백 파일명은 거부된다.",
-				},
-				"mode": map[string]any{
-					"type":        "string",
-					"enum":        []string{"create", "update"},
-					"description": "새 노트면 create, 이미 있는 노트에 붙이면 update. 실제 존재 여부와 다르면 거부된다.",
-				},
-				"title": map[string]any{"type": "string", "description": "노트 제목 (프론트매터 title)"},
-				"status": map[string]any{
-					"type": "string",
-					"enum": []string{"seedling", "growing", "evergreen", "archived"},
-					"description": "새 노트는 초안 내용을 보고 seedling이나 growing 중에 고른다 — 직접 해본 자국(돌려본 코드, " +
-						"실행 결과나 에러, \"해보니 ~였다\")이 글 안에 있으면 growing, 이해한 걸 적은 글이면 seedling. " +
-						"evergreen과 archived는 시간이 지나야 아는 것이라 새 노트에는 거부된다. " +
-						"update면 비워두는 게 기본 — 기존 값을 그대로 지킨다. 성숙도는 올릴 수만 있고 내릴 수는 없다(내리는 값은 무시된다).",
-				},
-				"tags": map[string]any{
-					"type":        "array",
-					"items":       map[string]any{"type": "string"},
-					"description": "네임스페이스 태그 (예: ['cs/grpc', 'cs/network']). topics/ 노트는 최소 1개.",
-				},
-				"aliases": map[string]any{
-					"type":        "array",
-					"items":       map[string]any{"type": "string"},
-					"description": "한/영 검색용 다른 이름. 없으면 생략.",
-				},
-				"body_from": map[string]any{
-					"type": "string",
-					"description": "우드로가 보낸 글에서 본문이 시작되는 첫 줄을 그대로 옮겨 적는다. " +
-						"'이거 정리해줘' 같은 지시문이 초안 앞에 붙어 있을 때만 쓰고, 아니면 생략한다 " +
-						"(생략하면 받은 글 전체가 본문). 요약하거나 고쳐 쓰는 자리가 아니다 — 첫 줄을 그대로 베끼는 자리다.",
-				},
-				"summary": map[string]any{
-					"type":        "string",
-					"description": "어디에 왜 넣었는지 한두 문장. PR 본문과 슬랙 답변에 그대로 쓰인다.",
-				},
-				"also": map[string]any{
-					"type": "array",
-					"description": "같은 PR에 담을 다른 파일. 새 노트를 만들면 그 카테고리 README.md 목차에 링크를 더할 때 쓴다. " +
-						"content는 그 파일의 전체 내용(부분 수정 아님).",
-					"items": map[string]any{
-						"type": "object",
-						"properties": map[string]any{
-							"path":    map[string]any{"type": "string"},
-							"content": map[string]any{"type": "string"},
-							"why":     map[string]any{"type": "string"},
-						},
-						"required": []string{"path", "content"},
-					},
-				},
-			},
-			"required": []string{"path", "mode", "title", "summary"},
+			"type":       "object",
+			"properties": proposeFields(),
+			"required":   []string{"path", "mode", "title", "summary"},
 		},
 	}
+}
+
+// noteFields is the half of the schema that decides the frontmatter, and the
+// half preview_note and propose_note have to agree on letter for letter.
+//
+// 둘이 같은 결정을 두 번 보는 것이라서 한 군데서 만들어 나눠 쓴다. 미리보기가
+// 받는 칸과 PR이 받는 칸이 갈리면 미리보기는 미리보기가 아니라 별개의 추측이
+// 되고, 그건 지금 고치려는 문제 그 자체다.
+func noteFields() map[string]any {
+	return map[string]any{
+		"path": map[string]any{
+			"type": "string",
+			"description": "노트 경로. 새 노트는 영문 kebab-case (예: 'topics/cs/grpc.md'). " +
+				"한글·공백 파일명은 거부된다.",
+		},
+		"mode": map[string]any{
+			"type":        "string",
+			"enum":        []string{"create", "update"},
+			"description": "새 노트면 create, 이미 있는 노트에 붙이면 update. 실제 존재 여부와 다르면 거부된다.",
+		},
+		"title": map[string]any{"type": "string", "description": "노트 제목 (프론트매터 title)"},
+		"status": map[string]any{
+			"type": "string",
+			"enum": []string{"seedling", "growing", "evergreen", "archived"},
+			"description": "새 노트는 초안 내용을 보고 seedling이나 growing 중에 고른다 — 직접 해본 자국(돌려본 코드, " +
+				"실행 결과나 에러, \"해보니 ~였다\")이 글 안에 있으면 growing, 이해한 걸 적은 글이면 seedling. " +
+				"evergreen과 archived는 시간이 지나야 아는 것이라 새 노트에는 거부된다. " +
+				"update면 비워두는 게 기본 — 기존 값을 그대로 지킨다. 성숙도는 올릴 수만 있고 내릴 수는 없다(내리는 값은 무시된다).",
+		},
+		"tags": map[string]any{
+			"type":        "array",
+			"items":       map[string]any{"type": "string"},
+			"description": "네임스페이스 태그 (예: ['cs/grpc', 'cs/network']). topics/ 노트는 최소 1개.",
+		},
+		"aliases": map[string]any{
+			"type":        "array",
+			"items":       map[string]any{"type": "string"},
+			"description": "한/영 검색용 다른 이름. 없으면 생략.",
+		},
+		"summary": map[string]any{
+			"type":        "string",
+			"description": "어디에 왜 넣었는지 한두 문장. 슬랙 답변과, 올릴 때는 PR 본문에 그대로 쓰인다.",
+		},
+	}
+}
+
+// proposeFields adds the two fields only the PR round has. 미리보기는 본문도
+// 다른 파일도 건드리지 않으니 둘 다 없다.
+func proposeFields() map[string]any {
+	f := noteFields()
+	f["body_from"] = map[string]any{
+		"type": "string",
+		"description": "우드로가 보낸 글에서 본문이 시작되는 첫 줄을 그대로 옮겨 적는다. " +
+			"'이거 정리해줘' 같은 지시문이 초안 앞에 붙어 있을 때만 쓰고, 아니면 생략한다 " +
+			"(생략하면 받은 글 전체가 본문). 요약하거나 고쳐 쓰는 자리가 아니다 — 첫 줄을 그대로 베끼는 자리다.",
+	}
+	f["also"] = map[string]any{
+		"type": "array",
+		"description": "같은 PR에 담을 다른 파일. 새 노트를 만들면 그 카테고리 README.md 목차에 링크를 더할 때 쓴다. " +
+			"content는 그 파일의 전체 내용(부분 수정 아님). 이미 있는 파일이면 read_note로 읽은 내용에서 " +
+			"더할 줄만 더해라 — 지운 줄은 PR 본문에 그대로 적혀 우드로가 보게 된다.",
+		"items": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path":    map[string]any{"type": "string"},
+				"content": map[string]any{"type": "string"},
+				"why":     map[string]any{"type": "string"},
+			},
+			"required": []string{"path", "content"},
+		},
+	}
+	return f
 }
 
 type proposeOut struct {
@@ -179,8 +199,11 @@ func (b *Brain) runPropose(ctx context.Context, input json.RawMessage, ask Ask) 
 				"내용이 있는 파일로 다시 올려달라고 슬랙에 답해주세요", ask.File.Name)
 		}
 		return "", fmt.Errorf("본문으로 쓸 원문이 없어요. 이 툴은 우드로가 보낸 글을 그대로 본문에 넣어요 — " +
-			"초안 없이 노트를 지어낼 수는 없어요. \"만들어라\"만 온 거라면 봇은 앞 메시지를 못 읽으니, " +
-			"초안을 \"만들어라\"와 같은 메시지에 붙여 다시 보내달라고 슬랙에 답해주세요")
+			"초안 없이 노트를 지어낼 수는 없어요. \"올려줘\"만 온 거라면, 초안을 파일로 첨부해 " +
+			"보내주셨다면 그 스레드에 답글로 \"올려줘\"라고 달아달라고 슬랙에 답해주세요 " +
+			"(봇이 그 스레드의 앞 메시지에서 파일을 다시 찾아옵니다). " +
+			"붙여넣기로 보내주신 글이라면 봇이 다시 읽을 수 없으니, 본문을 \"올려줘\"와 같은 " +
+			"메시지에 붙여 다시 보내달라고 답해주세요")
 	}
 
 	// The model's claim about create-vs-update is checked against the repo, not
@@ -189,11 +212,8 @@ func (b *Brain) runPropose(ctx context.Context, input json.RawMessage, ask Ask) 
 	if err != nil {
 		return "", err
 	}
-	switch {
-	case in.Mode == "create" && exists:
-		return "", fmt.Errorf("%s는 이미 있어요. 그 노트를 read_note로 읽고 mode=\"update\"로 다시 불러주세요", in.Path)
-	case in.Mode == "update" && !exists:
-		return "", fmt.Errorf("%s는 아직 없어요. mode=\"create\"로 다시 불러주세요", in.Path)
+	if err := checkMode(in.Mode, in.Path, exists); err != nil {
+		return "", err
 	}
 	if in.Mode == "update" {
 		body = mergeBody(prev.Body, body)
@@ -204,12 +224,16 @@ func (b *Brain) runPropose(ctx context.Context, input json.RawMessage, ask Ask) 
 		Path:    in.Path,
 		Content: renderNote(meta, body),
 	}}
+	var dropped []dropReport
 	for _, a := range in.Also {
-		content, err := b.withFrontmatter(ctx, a)
+		content, gone, err := b.withFrontmatter(ctx, a)
 		if err != nil {
 			return "", err
 		}
 		files = append(files, wikiwrite.File{Path: a.Path, Content: content})
+		if len(gone) > 0 {
+			dropped = append(dropped, dropReport{Path: a.Path, Lines: gone})
+		}
 	}
 
 	// 옵시디언 전용 문법은 세기만 하고 고치지 않는다. 본문에 손대는 순간 "원문 그대로"가
@@ -217,7 +241,7 @@ func (b *Brain) runPropose(ctx context.Context, input json.RawMessage, ask Ask) 
 	res, err := b.writer.Propose(ctx, wikiwrite.Proposal{
 		Slug:  in.Path,
 		Title: prTitle(in),
-		Body:  prBody(in, files, meta, vault.Check(body)),
+		Body:  prBody(in, files, meta, vault.Check(body), dropped),
 		Files: files,
 	})
 	if err != nil {
@@ -240,21 +264,87 @@ func (b *Brain) runPropose(ctx context.Context, input json.RawMessage, ask Ask) 
 // writing that raw deleted `title:`, `created:` and `tags:` off topics/cs/README.md
 // in PR #1. Asking the model to preserve something it was never shown is not a
 // prompt fix; the block is reattached here, from the file itself.
-func (b *Brain) withFrontmatter(ctx context.Context, a alsoIn) (string, error) {
+//
+// It also reports which lines the rewrite dropped. `also` hands over a whole
+// file, so a deletion looks exactly like an addition until someone reads the
+// diff. PR #4 lost `자료구조 / 알고리즘` that way: the prompt of the day asked the
+// model to delete one "작성 예정" line, it deleted the heading that line sat
+// under, and nothing in the PR said so.
+//
+// 그 뒤로 두 가지가 바뀌었다. 위키에서 "작성 예정" 섹션을 전부 없앴고, 프롬프트는
+// 목차에 줄을 더하는 것만 허락한다. 그래서 여기 걸리는 줄은 이제 원칙적으로 없어야
+// 한다 — 이건 화재경보고, 안 울리는 게 정상이다.
+//
+// Reported, never refused. 사람이 시킨 편집을 코드가 거절하기 시작하면 우드로는
+// 봇을 우회하게 되고, 그때부터 목차는 손으로 관리된다. 무엇이 사라졌는지만 PR 본문에
+// 적어 두면 머지 직전에 보인다.
+func (b *Brain) withFrontmatter(ctx context.Context, a alsoIn) (string, []string, error) {
 	prev, exists, err := b.lookup(ctx, a.Path)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	if !exists || prev.Frontmatter == "" {
-		// A brand-new file, or one that genuinely has no frontmatter. Nothing to
-		// preserve, so whatever the model wrote stands.
-		return a.Content, nil
+	if !exists {
+		// A brand-new file. Nothing to preserve, and nothing that can be lost.
+		return a.Content, nil, nil
 	}
 	// If the model invented a frontmatter block of its own it is dropped: the
 	// file's real one is the source of truth for created:, tags: and the rest,
 	// and two blocks would break the parser.
 	body := strings.TrimSpace(stripFrontmatter(a.Content))
-	return bumpUpdated(prev.Frontmatter, b.today()) + "\n\n" + body + "\n", nil
+	dropped := droppedLines(prev.Body, body)
+	if prev.Frontmatter == "" {
+		// Exists, but genuinely has no frontmatter. What the model wrote stands.
+		return a.Content, dropped, nil
+	}
+	return bumpUpdated(prev.Frontmatter, b.today()) + "\n\n" + body + "\n", dropped, nil
+}
+
+// dropReport is one file's worth of lines that went missing.
+type dropReport struct {
+	Path  string
+	Lines []string
+}
+
+// maxDroppedLines caps the report. A rewrite that dropped more than this is not
+// an edit to read line by line — it is a rewrite, and saying so is more use
+// than a wall of quoted text.
+const maxDroppedLines = 8
+
+// droppedLines names the non-blank lines of old that are absent from new.
+//
+// 줄 단위 집합 비교다. 자리만 바뀐 줄은 지운 게 아니니 세지 않고, 똑같은 줄이 두 번
+// 있다가 한 번이 된 경우도 세지 않는다 — 목차에서 그건 중복을 고친 것이고, 그걸
+// 경고로 올리면 정작 봐야 할 줄이 묻힌다.
+func droppedLines(old, new string) []string {
+	kept := make(map[string]bool)
+	for _, ln := range strings.Split(new, "\n") {
+		kept[strings.TrimSpace(ln)] = true
+	}
+	var out []string
+	seen := make(map[string]bool)
+	for _, ln := range strings.Split(old, "\n") {
+		t := strings.TrimSpace(ln)
+		if t == "" || kept[t] || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	return out
+}
+
+// checkMode holds the model's create-vs-update claim up against the repo.
+//
+// 미리보기와 PR이 같은 함수를 본다. 확인은 통과했는데 올려줘가 거부되는 것만큼
+// 설명하기 어려운 것도 없다.
+func checkMode(mode, path string, exists bool) error {
+	switch {
+	case mode == "create" && exists:
+		return fmt.Errorf("%s는 이미 있어요. 그 노트를 read_note로 읽고 mode=\"update\"로 다시 불러주세요", path)
+	case mode == "update" && !exists:
+		return fmt.Errorf("%s는 아직 없어요. mode=\"create\"로 다시 불러주세요", path)
+	}
+	return nil
 }
 
 var updatedRe = regexp.MustCompile(`(?m)^updated:.*$`)
@@ -366,9 +456,10 @@ func validatePropose(in proposeIn) error {
 // 열린다. 그 판정이 여기 있는 이유는 프롬프트가 규칙이 아니기 때문이다 — 모델이 한
 // 번 헷갈릴 때마다 PR이 하나씩 열리게 둘 수는 없다.
 //
-// 승인은 초안과 같은 메시지를 타고 온다. 스레드로 나눠 받으려면 봇이 자기 스레드의
-// 원문을 읽을 수 있어야 하는데(conversations.replies), 그건 슬랙 앱 권한을 하나 더
-// 받고 다시 설치해야 하는 일이라 지금은 하지 않는다.
+// 승인은 초안과 같은 메시지를 타고 오는 게 기본이다. 다만 확인을 한 번 거친 뒤에는
+// 스레드에 "올려줘" 한 마디만 달아도 된다 — 워커가 conversations.replies로 그 스레드의
+// 앞 메시지에서 초안을 다시 찾아온다. 여기 판정은 그때도 똑같이 이 함수를 지난다.
+// 승인을 읽는 낱말이 두 벌이 되면 한쪽만 승인으로 읽는 날이 생긴다.
 
 // goAheadWords are the ways 우드로 says "do it", matched anywhere in a short
 // line so "이거 정리해서 올려줘"처럼 앞에 말이 붙어도 걸린다.
@@ -415,6 +506,16 @@ func goAhead(text string) bool {
 	}
 	return false
 }
+
+// WantsUpload reports whether this Slack message carries approval to open a PR.
+//
+// goAhead를 밖으로 낸 창구다. 워커가 "첨부는 없는데 올려달라는 말만 왔다"를 알아보고
+// 스레드에서 초안을 찾아올지 정할 때 쓴다.
+//
+// 같은 함수를 쓰는 게 요점이다. 워커가 자기 나름의 낱말 목록으로 판정하면 초안은
+// 찾아왔는데 게이트는 승인으로 안 읽는(또는 그 반대의) 어긋남이 생기고, 그건 슬랙
+// 답만 보고는 어느 쪽이 틀렸는지 알 수 없다.
+func WantsUpload(text string) bool { return goAhead(text) }
 
 func instructionAtEdge(text string) bool {
 	lines := strings.Split(text, "\n")
@@ -788,6 +889,16 @@ func resolveMeta(in proposeIn, prev, own *wiki.Note, today string) noteMeta {
 // 우드로's text — 붙여넣은 초안이면 draftBody가, 첨부 파일이면 파일 자신이 준 글이다.
 // 이 함수가 하는 일은 그 위에 여섯 줄을 얹는 것뿐이다.
 func renderNote(m noteMeta, body string) string {
+	return renderFrontmatter(m) + "\n" + strings.TrimSpace(body) + "\n"
+}
+
+// renderFrontmatter prints the six lines, `---` fences included.
+//
+// 갈라 둔 이유는 하나다: 확인 라운드가 보여주는 블록과 PR이 파일에 심는 블록이
+// 같은 함수에서 나와야 한다. 모델이 미리보기를 손으로 타이핑하던 동안 그 둘은
+// 갈릴 수 있었고 실제로 갈렸다 — 그가 파일에 적은 태그 하나가 미리보기에서
+// 빠졌는데, PR에는 제대로 들어갔다. 맞는 쪽이 보여준 쪽과 달랐던 것이다.
+func renderFrontmatter(m noteMeta) string {
 	var b strings.Builder
 	b.WriteString("---\n")
 	fmt.Fprintf(&b, "title: %s\n", m.Title)
@@ -800,9 +911,7 @@ func renderNote(m noteMeta, body string) string {
 		fmt.Fprintf(&b, "tags: [%s]\n", strings.Join(m.Tags, ", "))
 	}
 	fmt.Fprintf(&b, "status: %s\n", m.Status)
-	b.WriteString("---\n\n")
-	b.WriteString(strings.TrimSpace(body))
-	b.WriteString("\n")
+	b.WriteString("---\n")
 	return b.String()
 }
 
@@ -868,7 +977,7 @@ func prTitle(in proposeIn) string {
 	return fmt.Sprintf("노트: %s", in.Title)
 }
 
-func prBody(in proposeIn, files []wikiwrite.File, m noteMeta, vr vault.Report) string {
+func prBody(in proposeIn, files []wikiwrite.File, m noteMeta, vr vault.Report, dropped []dropReport) string {
 	var b strings.Builder
 	b.WriteString(strings.TrimSpace(in.Summary))
 	b.WriteString("\n\n### 담긴 파일\n")
@@ -894,6 +1003,23 @@ func prBody(in proposeIn, files []wikiwrite.File, m noteMeta, vr vault.Report) s
 		fmt.Fprintf(&b, "\n> [!WARNING]\n> 적어주신 값을 하나 바꿨습니다 — %s\n", r)
 	}
 
+	// 지운 줄은 diff에 있지만 diff는 "이건 봐야 한다"고 말해주지 않는다. 더한 줄과
+	// 지운 줄이 나란히 있으면 눈은 더한 쪽만 읽는다 — PR #4에서 실제로 그랬다.
+	for _, d := range dropped {
+		fmt.Fprintf(&b, "\n> [!WARNING]\n> `%s`에서 %d줄이 사라졌습니다. 목차에서 노트가 된 항목을 지운 것이면 맞고, "+
+			"아직 노트가 없는 항목이면 되살려주세요.\n", d.Path, len(d.Lines))
+		shown := d.Lines
+		if len(shown) > maxDroppedLines {
+			shown = shown[:maxDroppedLines]
+		}
+		for _, ln := range shown {
+			fmt.Fprintf(&b, "> - %s\n", codeSpan(ln))
+		}
+		if n := len(d.Lines) - len(shown); n > 0 {
+			fmt.Fprintf(&b, "> - …외 %d줄 (diff를 보세요)\n", n)
+		}
+	}
+
 	// 옵시디언에서만 되는 문법. 세어서 알리기만 하고 고치지는 않는다 — 본문을 손대는
 	// 순간 "원문 그대로"라는 약속이 무너지고, 고칠지 말지는 이 PR을 보는 사람이 정한다.
 	if !vr.OK() {
@@ -911,6 +1037,31 @@ func prBody(in proposeIn, files []wikiwrite.File, m noteMeta, vr vault.Report) s
 		"분류(status·tags·aliases)만 정했습니다. 문장은 손대지 않았습니다.\n")
 	b.WriteString("\n---\n🤖 `memories-wiki-bot`이 연 PR입니다. 내용을 확인하고 머지해주세요.\n")
 	return b.String()
+}
+
+// codeSpan wraps s in inline code with a fence long enough to survive whatever
+// backticks are already inside it.
+//
+// 목차 줄에는 `.proto`처럼 백틱이 흔하다. 경고 블록 안에서 백틱 하나가 짝을 잃으면
+// 그 뒤가 통째로 코드로 먹히고, 보여주려던 줄이 오히려 안 보인다.
+func codeSpan(s string) string {
+	longest, run := 0, 0
+	for _, r := range s {
+		if r != '`' {
+			run = 0
+			continue
+		}
+		run++
+		if run > longest {
+			longest = run
+		}
+	}
+	fence := strings.Repeat("`", longest+1)
+	pad := ""
+	if strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
+		pad = " "
+	}
+	return fence + pad + s + pad + fence
 }
 
 func backticked(keys []string) []string {

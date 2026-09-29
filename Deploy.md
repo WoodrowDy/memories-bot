@@ -55,7 +55,12 @@ cp .env.example .env            # 처음 한 번만
 1. 슬랙 앱 → **Event Subscriptions → Enable**
 2. **Request URL** = `https://xxxx.../slack/events` → 초록 **Verified** 확인
 3. **Subscribe to bot events** → `app_mention` 추가 → **Save**
-4. 재설치 뜨면 **Reinstall** — ⚠️ 재설치하면 `xoxb-` 토큰이 **새로 발급되어 옛 토큰이 죽는다.** OAuth & Permissions에서 새 값을 복사해 `.env`를 갱신하고 `./deploy.sh` 다시.
+4. 재설치 뜨면 **Reinstall** — 끝나면 OAuth & Permissions의 `xoxb-`를 `.env`의 값과
+   **눈으로 대조할 것.** 재설치가 토큰을 항상 바꾸지는 않는다 (2026-07-30에 스코프를
+   추가하고 재설치했는데 그대로였다). 같으면 손댈 게 없다 — 스코프는 토큰 문자열이
+   아니라 슬랙 서버 쪽에서 그 토큰에 붙으니, 같은 토큰이 넓어진 스코프를 그대로
+   들고 있고 **재배포도 필요 없다.** 다르면 새 값을 `.env`에 넣고 `./deploy.sh` 다시 —
+   그 순간 옛 토큰은 죽는다.
 5. **Socket Mode는 반드시 Off** (Settings → Socket Mode). 켜져 있으면 슬랙이 Request URL로 이벤트를 보내지 않는다.
 
 ## ⑤ 테스트 — 슬랙
@@ -90,11 +95,13 @@ brain: turns=2 in=4210 out=180 tools=[search_wiki read_note]
 - **같은 답이 두 번** → `worker`가 에러를 던져 SQS가 재전송한 것. DLQ(`...-jobs-dlq`)를 보면 원인이 남아 있다
 - **`slack post: invalid_auth`** → 재설치하며 `xoxb-`가 로테이션됨. 새 토큰을 `.env`에 넣고 재배포
 - **`.md`를 첨부했는데 봇이 못 본 척한다** → `files:read` 스코프가 없다. 슬랙이 이벤트에서
-  `files[]`를 빼고 보내므로 봇 쪽엔 아무 흔적도 안 남는다. 스코프 추가 → **Reinstall** →
-  새 `xoxb-`를 `.env`에 → 재배포
+  `files[]`를 빼고 보내므로 봇 쪽엔 아무 흔적도 안 남는다. 스코프 추가 → **Reinstall**.
+  재설치 후 `xoxb-`가 `.env`와 같으면 재배포도 필요 없다 (스코프는 서버 쪽에서 그 토큰에
+  붙는다). 다르면 새 값을 넣고 재배포
 - **봇이 `봇 토큰에 files:read 스코프가 없어 보여요`라고 답한다** → 스코프는 넣었는데 재설치를
-  안 했거나, 재설치로 새로 나온 `xoxb-`를 `.env`에 안 넣었다. 파일이 온 건 봤으니 이벤트
-  구독은 멀쩡하고 다운로드만 막힌 상태다. Reinstall → 새 토큰 → 재배포
+  안 했거나, 재설치로 토큰이 바뀌었는데 `.env`가 옛것이다. 파일이 온 건 봤으니 이벤트
+  구독은 멀쩡하고 다운로드만 막힌 상태다. Reinstall → OAuth 페이지의 `xoxb-`와 `.env` 대조 →
+  다르면 갱신하고 재배포
 - **답이 항상 키워드 검색 수준** → CloudWatch에서 `brain: ... falling back` 줄을 찾아 이유 확인 (키 오타 / 크레딧 소진 / 모델명 오타)
 - **배포 권한 에러** → IAM에 Lambda·APIGateway·CloudFormation·IAM·SQS 권한
 - **`UnreservedConcurrentExecutions below its minimum value of [10]`** → 계정 동시 실행 한도가 낮은

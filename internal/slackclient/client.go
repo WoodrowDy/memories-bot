@@ -6,13 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
 
-// Client is a tiny Slack Web API client — only the two calls this bot makes:
+// Client is a tiny Slack Web API client — only the calls this bot makes:
 // chat.postMessage for the answer, assistant.threads.setStatus for the "쓰는 중"
-// 표시 that fills the wait before it.
+// 표시 that fills the wait before it, conversations.replies to find a draft
+// attached earlier in the thread, and a raw GET for the file bytes.
 type Client struct {
 	token   string
 	baseURL string
@@ -79,6 +81,33 @@ func (c *Client) call(ctx context.Context, method string, body any) error {
 		return errors.New("slack: " + r.Error)
 	}
 	return nil
+}
+
+// get calls one Slack Web API method with query parameters and decodes the whole
+// response into out.
+//
+// call() 옆에 따로 있는 이유는 두 가지다. 읽는 쪽 메서드는 GET에 쿼리스트링으로
+// 부르는 게 슬랙이 문서에 적어둔 꼴이고, 무엇보다 call()은 응답 몸통을 ok 여부만
+// 보고 버린다 — 몸통이 곧 답인 호출에는 쓸 수 없다.
+//
+// ok:false 판정을 여기서 안 하는 건 부르는 쪽이 에러 낱말을 사람 말로 바꿔야 하기
+// 때문이다. out에 apiResp를 끼워 두면 그 자리에서 같이 디코드된다.
+func (c *Client) get(ctx context.Context, method string, q url.Values, out any) error {
+	if c.token == "" {
+		return errors.New("SLACK_BOT_TOKEN not set")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/"+method+"?"+q.Encode(), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	res, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	return json.NewDecoder(res.Body).Decode(out)
 }
 
 type postMessageReq struct {

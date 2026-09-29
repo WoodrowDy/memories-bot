@@ -168,9 +168,12 @@ func TestLastTurnDropsToolsSoTheModelMustAnswer(t *testing.T) {
 	if f.seen[maxTurns-1].Tools != nil {
 		t.Error("tools should be withheld on the final turn")
 	}
+	// 읽기 툴 수를 여기 숫자로 박아두면 툴을 하나 더할 때마다 이 테스트가 깨진다.
+	// 여기서 지키려는 건 개수가 아니라 "마지막 턴만 툴이 없다"다.
+	want := len(b.readTools())
 	for i := 0; i < maxTurns-1; i++ {
-		if len(f.seen[i].Tools) != 4 {
-			t.Errorf("turn %d offered %d tools, want 4", i, len(f.seen[i].Tools))
+		if len(f.seen[i].Tools) != want {
+			t.Errorf("turn %d offered %d tools, want %d", i, len(f.seen[i].Tools), want)
 		}
 	}
 }
@@ -190,6 +193,25 @@ func TestSystemPromptNamesTheRepoAndBansDoubleAsterisks(t *testing.T) {
 	for _, want := range []string{"WoodrowDy/memories", "topics/", "지어내지 마", "별표 하나"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("system prompt missing %q", want)
+		}
+	}
+}
+
+// PR #4는 프롬프트가 목차에서 줄을 지우라고 시켜서 일어났다. "작성 예정"의 그 한 줄만
+// 지우라고 했고, 모델은 그 줄이 있던 섹션을 통째로 지웠다. 위키에서 "작성 예정"을 없앤
+// 뒤로 지울 줄 자체가 없어졌으니, 프롬프트가 다시 삭제를 시키는 일이 없어야 한다.
+// 지시문 검사는 무르지만 이건 값을 치른 규칙이고, 되돌아오는 순간 다시 값을 치른다.
+func TestSystemPromptOnlyEverAddsToAMOC(t *testing.T) {
+	b := New(&fakeLLM{}, &fakeWiki{}, "m", "WoodrowDy", "memories")
+	p := b.systemPrompt()
+
+	if !strings.Contains(p, "줄을 더하기만 해") {
+		t.Error("목차는 더하기만 한다는 지시가 프롬프트에 없다")
+	}
+	// 지우라는 말이 다시 들어오면 여기서 걸린다.
+	for _, banned := range []string{"그 줄만** 지워", "그 줄만 지워", "작성 예정"} {
+		if strings.Contains(p, banned) {
+			t.Errorf("프롬프트가 다시 목차 삭제를 시킨다: %q", banned)
 		}
 	}
 }

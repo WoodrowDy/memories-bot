@@ -389,16 +389,47 @@ func parseNote(path, raw string) Note {
 	return n
 }
 
+// fmScalar reads one key's value — and nothing past the end of that key's line.
+//
+// `\s*`가 아니라 `[ \t]*`인 데는 이유가 있다. `\s`는 줄바꿈까지 먹어서, 값이 빈 칸이면
+// 다음 줄을 값으로 물고 온다. 우드로가 프론트매터 틀만 적어 보낸 파일이 딱 이 꼴이다:
+//
+//	updated:
+//	tags:
+//	status:
+//
+// 여기서 `\s*`는 tags의 값으로 "status:"를 돌려줬다. 그 거짓 값이 고약한 건 조용해서다 —
+// resolveMeta는 비지 않은 값을 "그가 손으로 적은 값"으로 읽으니 모델이 고른 태그를 버리고,
+// PR에는 `status:`라는 태그가 박힌다. 봇도 로그도 아무 말을 안 하고, diff를 열어야만 보인다.
 func fmScalar(block, key string) string {
-	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `:\s*(.*)$`)
+	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `:[ \t]*(.*)$`)
 	if m := re.FindStringSubmatch(block); m != nil {
 		return strings.TrimSpace(strings.Trim(strings.TrimSpace(m[1]), `"'`))
 	}
 	return ""
 }
 
+// fmList reads a list value in either of the two shapes a vault file can carry.
+//
+//	tags: [cs/http, cs/network]    ← CONVENTIONS.md가 정한 꼴. 위키의 노트는 전부 이 꼴이다
+//	tags:                          ← 옵시디언 속성(Properties) 편집기가 쓰는 꼴
+//	  - cs/http
+//	  - cs/network
+//
+// 둘 다 읽는 건 저장소가 옵시디언 볼트와 같아야 하기 때문이다. 옵시디언 UI에서 태그를
+// 한 번 만지면 그 파일은 블록 꼴로 다시 쓰인다. 그걸 못 읽으면 fmList가 빈 목록을 주고
+// resolveMeta는 "그가 안 적었다"로 읽는다 — 그가 고른 태그가 모델이 고른 태그로 조용히
+// 갈리는 것이고, pickList가 막으려던 게 바로 그거다.
+//
+// 읽기는 두 꼴 다, 쓰기는 컨벤션대로 인라인 한 꼴 (renderNote).
 func fmList(block, key string) []string {
-	v := fmScalar(block, key)
+	if v := fmScalar(block, key); v != "" {
+		return fmInlineItems(v)
+	}
+	return fmBlockItems(block, key)
+}
+
+func fmInlineItems(v string) []string {
 	v = strings.TrimSpace(strings.Trim(v, "[]"))
 	if v == "" {
 		return nil
@@ -407,6 +438,41 @@ func fmList(block, key string) []string {
 	for _, p := range strings.Split(v, ",") {
 		p = strings.TrimSpace(strings.Trim(strings.TrimSpace(p), `"'`))
 		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// fmItemRe matches a YAML sequence item. 들여쓰기는 있을 수도 없을 수도 있다 — 옵시디언은
+// 두 칸 넣지만 들여쓰지 않은 것도 YAML로는 같은 목록이다.
+var fmItemRe = regexp.MustCompile(`^[ \t]*-[ \t]+(.+)$`)
+
+// fmBlockItems collects the `- item` lines that follow a key with no inline value.
+func fmBlockItems(block, key string) []string {
+	lines := strings.Split(block, "\n")
+
+	start := -1
+	for i, l := range lines {
+		// 최상위 키는 1열에서 시작한다. 들여쓴 줄에 같은 이름이 있어도 그건 남의 값이다.
+		if rest, ok := strings.CutPrefix(l, key+":"); ok && strings.TrimSpace(rest) == "" {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+
+	var out []string
+	// 목록은 키 바로 다음 줄부터 이어진다. 항목이 아닌 줄 — 다음 키든 빈 줄이든 — 이
+	// 나오면 거기서 끊는다. 계속 훑으면 저 아래 다른 키의 목록까지 끌어온다.
+	for _, l := range lines[start+1:] {
+		m := fmItemRe.FindStringSubmatch(l)
+		if m == nil {
+			break
+		}
+		if p := strings.TrimSpace(strings.Trim(strings.TrimSpace(m[1]), `"'`)); p != "" {
 			out = append(out, p)
 		}
 	}

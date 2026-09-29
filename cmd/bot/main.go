@@ -152,6 +152,7 @@ func (a *app) gateway(ctx context.Context, req events.APIGatewayV2HTTPRequest) (
 	job := jobs.Job{
 		Channel:  ev.Channel,
 		ThreadTS: threadTS,
+		TS:       ev.TS,
 		User:     ev.User,
 		Text:     strings.TrimSpace(mentionRe.ReplaceAllString(ev.Text, "")),
 	}
@@ -214,6 +215,38 @@ func (a *app) reply(ctx context.Context, job jobs.Job) {
 		log.Printf("slack status: %v", err)
 	}
 
+	// 첨부 없이 "올려줘"만 스레드에 달렸으면 초안은 앞 메시지에 있다. 봇은 메시지 하나가
+	// 곧 대화 하나라서 그걸 못 보지만, 슬랙에는 그대로 남아 있으니 다시 읽어 온다.
+	//
+	// 이게 없으면 확인을 한 번 거칠 때마다 같은 파일을 두 번 첨부해야 한다. 봇이 초안을
+	// 어디 저장해 두는 게 아니라 슬랙을 다시 읽는 것이라, 단발성 구조는 그대로다.
+	//
+	// 게이트웨이가 아니라 여기서 부르는 이유: 게이트웨이는 3초 안에 ack해야 한다.
+	fromThread := ""
+	if wantsThreadDraft(job) {
+		f, err := a.draftFromThread(ctx, job)
+		if err != nil {
+			// 조용히 넘기지 않는다. 넘기면 모델은 첨부가 없는 걸로 알고 "올릴 초안이
+			// 없어요"라고 답하는데, 진짜 이유는 스코프가 없다거나 봇이 채널에 없다는
+			// 것이다 — 실패가 실패처럼 안 보이는 자리라서 여기서 끝낸다.
+			log.Printf("worker: thread lookup: %v", err)
+			if err := a.slack.PostThread(job.Channel, job.ThreadTS,
+				"스레드에서 앞 메시지를 못 읽어서 초안을 못 찾았어요.\n"+err.Error()+
+					"\n\n지금 당장 올리시려면 초안을 이 메시지에 다시 첨부하면서 \"올려줘\"라고 적어주세요."); err != nil {
+				log.Printf("slack post: %v", err)
+			}
+			audit.Log(audit.Entry{
+				UserID: job.User, ChannelID: job.Channel, Tool: "thread_draft",
+				Allowed: true, Success: false, LatencyMs: time.Since(start).Milliseconds(),
+			})
+			return
+		}
+		if f != nil {
+			job.File = f
+			fromThread = f.Name
+		}
+	}
+
 	// 바이트는 여기서 받는다. 게이트웨이는 3초 안에 ack해야 해서 파일 하나 받아오는 데
 	// 그 시간을 쓸 수 없고, 워커는 300초를 쥐고 있다.
 	ask := brain.Ask{Text: job.Text}
@@ -237,7 +270,7 @@ func (a *app) reply(ctx context.Context, job jobs.Job) {
 	}
 
 	msg, tool := a.answer(ctx, ask)
-	msg += tail(job, ask.File)
+	msg += tail(job, ask.File, fromThread)
 
 	success := true
 	if err := a.slack.PostThread(job.Channel, job.ThreadTS, msg); err != nil {
@@ -258,8 +291,14 @@ func (a *app) reply(ctx context.Context, job jobs.Job) {
 //
 // PR이 안 열려도 들린다는 게 핵심이다. 초안만 던져 추천만 받는 자리에서도 `[[위키링크]]`가
 // 몇 개인지는 알아야 하고, 그건 PR 본문만으로는 닿지 않는 자리다.
-func tail(job jobs.Job, att *brain.Attached) string {
+func tail(job jobs.Job, att *brain.Attached, fromThread string) string {
 	var lines []string
+	// 어느 초안을 집었는지는 반드시 보여야 한다. 스레드에 초안이 둘 이상 붙어 있으면
+	// 봇이 고른 것과 그가 생각한 것이 다를 수 있고, 그 어긋남은 PR diff를 열어봐야
+	// 보인다. 이름 한 줄이면 올리기 전에 갈린다.
+	if fromThread != "" {
+		lines = append(lines, "*스레드에서 초안을 다시 읽었어요* — `"+fromThread+"`")
+	}
 	if len(job.Ignored) > 0 {
 		lines = append(lines, "*안 읽은 첨부*")
 		for _, s := range job.Ignored {
@@ -278,6 +317,64 @@ func tail(job jobs.Job, att *brain.Attached) string {
 		return ""
 	}
 	return "\n\n" + strings.Join(lines, "\n")
+}
+
+// ---- 스레드에 남은 초안 되찾기 ----
+
+// wantsThreadDraft decides whether it is worth one Slack call to look for a
+// draft attached earlier in this thread.
+//
+// 네 가지가 다 맞아야 부른다. 하나라도 헐거워지면 평범한 질문 하나마다 슬랙 호출이
+// 붙거나, 그가 방금 던진 것과 다른 파일이 올라간다.
+//
+//	첨부가 없다      — 붙여 보냈으면 그게 그가 말하는 초안이다. 앞 메시지를 볼 이유가 없다.
+//	넘긴 첨부도 없다  — .md가 아니거나 너무 큰 걸 붙였을 때다. 여기서 앞 메시지를 뒤지면
+//	                  그는 새 파일을 올린 줄 알고 봇은 옛 파일을 올린다. 제일 위험한 쪽이라
+//	                  아예 안 본다 — 무엇을 왜 안 읽었는지는 tail이 말해준다.
+//	스레드 답글이다   — TS와 ThreadTS가 같으면 스레드를 여는 첫 메시지고, 그 앞에는 아무것도 없다.
+//	올리라고 했다     — 확인만 물어보는 자리에 초안을 되찾아 올 이유는 없다.
+func wantsThreadDraft(job jobs.Job) bool {
+	return job.File == nil &&
+		len(job.Ignored) == 0 &&
+		job.ThreadTS != "" && job.TS != "" && job.ThreadTS != job.TS &&
+		brain.WantsUpload(job.Text)
+}
+
+func (a *app) draftFromThread(ctx context.Context, job jobs.Job) (*jobs.File, error) {
+	msgs, err := a.slack.Replies(ctx, job.Channel, job.ThreadTS)
+	if err != nil {
+		return nil, err
+	}
+	return pickThreadDraft(msgs, job.User, job.TS), nil
+}
+
+// pickThreadDraft chooses the draft from a thread's messages, or nil.
+//
+// 뒤에서부터 본다. 초안을 고쳐서 스레드에 다시 붙였으면 나중 것이 그가 말하는 초안이다.
+//
+// 올린 사람을 맞춰 보는 건 봇 자기 답과 남이 끼워 넣은 파일을 둘 다 걸러내기 위한
+// 것이다. 지금은 혼자 쓰는 봇이지만, 남의 첨부가 그의 이름으로 위키에 올라가는 길은
+// 열어둘 이유가 없다.
+//
+// 고르는 규칙 자체는 jobs.Pick에 맡긴다. 첨부로 던졌을 때와 스레드에서 되찾을 때
+// 서로 다른 파일이 뽑히면 그건 설명할 수 없는 동작이 된다.
+func pickThreadDraft(msgs []slackclient.ThreadMessage, user, skipTS string) *jobs.File {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.TS == skipTS || m.User != user || len(m.Files) == 0 {
+			continue
+		}
+		cand := make([]jobs.File, 0, len(m.Files))
+		for _, f := range m.Files {
+			cand = append(cand, jobs.File{Name: f.Name, URL: f.URL, Size: f.Size})
+		}
+		// 여기서 나온 ignored는 버린다. 그 첨부를 처음 던졌을 때 이미 한 번 들었고,
+		// 승인 한 마디에 지난 잔소리가 따라붙으면 새로 넘긴 것과 구별이 안 된다.
+		if chosen, _ := jobs.Pick(cand); chosen != nil {
+			return chosen
+		}
+	}
+	return nil
 }
 
 func (a *app) answer(ctx context.Context, ask brain.Ask) (msg, tool string) {

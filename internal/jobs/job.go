@@ -13,6 +13,14 @@ type Job struct {
 	Text     string `json:"text"`
 	EventID  string `json:"event_id,omitempty"`
 
+	// TS is this mention's own timestamp.
+	//
+	// ThreadTS와 같으면 스레드를 새로 여는 메시지고, 다르면 이미 있는 스레드에 달린
+	// 답글이다. 그 둘이 갈려야 워커가 "앞 메시지에 초안이 있나" 찾아볼지 정할 수
+	// 있는데, ThreadTS는 답을 올릴 자리로 쓰느라 빈 값을 TS로 메워 두기 때문에
+	// (ThreadTS 하나만으로는 구별이 안 된다) 원래 값이 따로 실려야 한다.
+	TS string `json:"ts,omitempty"`
+
 	// File is the one .md attachment the worker should fetch, or nil.
 	//
 	// 메타데이터만 실린다. 게이트웨이가 바이트를 받아오면 슬랙의 3초 ack를 놓치고,

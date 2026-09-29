@@ -175,6 +175,102 @@ func TestBlankFieldsAreFilledAndSaidSo(t *testing.T) {
 	}
 }
 
+// 반만 채운 파일. 옵시디언에서 프론트매터 틀만 잡아놓고 만 흔한 꼴이고,
+// `test-drafts/http2.md`가 일부러 이 모양이다.
+//
+// 위의 두 테스트는 "다 적힌 파일"과 "title만 적힌 파일"을 보는데, 정작 깨져 있던 건 그
+// 사이였다 — 적힌 칸과 빈 칸이 *섞인* 파일. `fmScalar`의 `\s*`가 줄바꿈까지 먹어서 빈
+// `tags:`가 아랫줄의 `status:`를 값으로 물고 왔고, resolveMeta는 비지 않은 값을 "그가
+// 손으로 적은 값"으로 읽으니 모델이 고른 태그를 존중하며 버리고 `tags: [status:]`를
+// PR에 박았다. 봇도 로그도 아무 말을 안 한다 — diff를 열어야만 보인다.
+//
+// wiki 패키지의 단위 테스트는 파서가 뭘 읽었는지까지만 본다. 피해는 여기서 난다.
+func TestAHalfFilledFileNeverTurnsTheNextLineIntoAValue(t *testing.T) {
+	b, w := writingBrain(nil)
+	half := "---\ntitle: HTTP/2\naliases: [http2, http 2.0]\ncreated: 2026-07-30\n" +
+		"updated:\ntags:\nstatus:\n---\n\n# HTTP/2\n\n하나의 TCP 연결에 여러 요청을 실어 보낸다.\n"
+
+	_, err := b.runPropose(context.Background(), json.RawMessage(goodPropose),
+		Ask{Text: "올려줘", File: file("http2.md", half)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fm, _, _ := strings.Cut(w.got[0].Files[0].Content, "---\n\n")
+
+	if strings.Contains(fm, "status:]") || strings.Contains(fm, "updated:]") {
+		t.Errorf("빈 칸이 아랫줄을 값으로 물고 와 그대로 실렸다:\n%s", fm)
+	}
+	for _, want := range []string{
+		"title: HTTP/2",               // 그가 적은 값
+		"aliases: [http2, http 2.0]",  // 그가 적은 값
+		"created: 2026-07-30",         // 그가 적은 값
+		"updated: 2026-07-22",         // 이 칸은 언제나 오늘
+		"tags: [cs/grpc, cs/network]", // 빈 칸 → 모델 값이 들어와야 한다
+		"status: seedling",            // 빈 칸 → 모델 값
+	} {
+		if !strings.Contains(fm, want) {
+			t.Errorf("frontmatter missing %q:\n%s", want, fm)
+		}
+	}
+
+	// 빈 칸이 값으로 읽히면 봇은 그걸 그의 값으로 알고, 채웠다는 말조차 안 한다.
+	body := w.got[0].Body
+	for _, want := range []string{"`tags`", "`status`"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("PR 본문이 채운 칸에 %s를 안 적었다:\n%s", want, body)
+		}
+	}
+	for _, gone := range []string{"`title`", "`aliases`", "`created`"} {
+		if strings.Contains(body, gone) {
+			t.Errorf("그가 적은 %s가 봇이 채운 칸에 끼었다:\n%s", gone, body)
+		}
+	}
+}
+
+// 옵시디언 속성(Properties) 편집기로 태그를 한 번 만지면 그 파일은 이 꼴로 다시 쓰인다.
+// 지금 위키의 노트는 전부 인라인 `[...]`이지만, 저장소가 볼트와 같아야 하니 이렇게 온
+// 파일도 그의 값으로 읽혀야 한다.
+//
+// 못 읽으면 조용히 진다. fmList가 빈 목록을 주고, resolveMeta는 "그가 안 적었다"로 읽고,
+// 그가 고른 태그가 모델이 고른 태그로 갈린 채 PR에 실린다. pickList가 막으려던 게 정확히
+// 그거다 — 옵시디언에서 일부러 뗀 태그가 PR마다 되살아나는 것.
+func TestObsidiansBlockStyleFrontmatterIsStillHisOwnValue(t *testing.T) {
+	b, w := writingBrain(nil)
+	block := "---\ntitle: HTTP/2\naliases:\n  - http2\n  - \"http 2.0\"\n" +
+		"tags:\n  - cs/http\n  - cs/network\nstatus: growing\ncreated: 2026-07-30\n---\n\n# HTTP/2\n\n본문\n"
+
+	_, err := b.runPropose(context.Background(), json.RawMessage(goodPropose),
+		Ask{Text: "올려줘", File: file("http2.md", block)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fm, _, _ := strings.Cut(w.got[0].Files[0].Content, "---\n\n")
+
+	// 읽기는 두 꼴 다, 쓰기는 컨벤션대로 인라인 한 꼴이다.
+	for _, want := range []string{
+		"aliases: [http2, http 2.0]",
+		"tags: [cs/http, cs/network]",
+		"status: growing",
+	} {
+		if !strings.Contains(fm, want) {
+			t.Errorf("frontmatter missing %q:\n%s", want, fm)
+		}
+	}
+	if strings.Contains(fm, "\n  - ") {
+		t.Errorf("블록 꼴이 그대로 다시 쓰였다 — CONVENTIONS.md가 정한 꼴은 인라인이다:\n%s", fm)
+	}
+	// 모델 값이 하나라도 새어 들어가면 그가 고른 분류가 갈린 것이다.
+	for _, gone := range []string{"cs/grpc", "그RPC", "seedling"} {
+		if strings.Contains(fm, gone) {
+			t.Errorf("model value %q overrode his own:\n%s", gone, fm)
+		}
+	}
+	// 그가 적은 칸을 봇이 채웠다고 말하면, 그것도 거짓말이다.
+	if body := w.got[0].Body; strings.Contains(body, "`tags`") || strings.Contains(body, "`aliases`") {
+		t.Errorf("그가 적은 tags/aliases가 봇이 채운 칸에 끼었다:\n%s", body)
+	}
+}
+
 // 붙여넣기 경로에는 "그가 적은 칸"이라는 게 없다. 전부 봇이 정한 것이라 다 적어봐야
 // PR 본문에 한 줄이 늘 뿐이고, 그래서 이 절은 통째로 나오지 않는다.
 func TestThePasteePathSaysNothingAboutFilledFields(t *testing.T) {
@@ -423,6 +519,75 @@ func TestPromptCarriesTheFileAndSaysWhatItIs(t *testing.T) {
 func TestPromptIsJustTheTextWhenNoFileCame(t *testing.T) {
 	if got := (Ask{Text: draft}).prompt(); got != draft {
 		t.Errorf("the paste path's prompt changed:\n%s", got)
+	}
+}
+
+// ---- 어느 라운드인지 코드가 알려준다 ----
+
+// 2026-07-30 11:45. 그는 승인 낱말을 적어 파일과 함께 던졌는데 PR이 열리지 않았고,
+// 돌아온 건 "초안을 다시 보내주세요"였다. 낱말을 잘못 읽은 게 아니다 — 모델이
+// propose_note 앞까지 오지도 않았다. 낱말 읽는 일은 이미 코드가 하고 있으니, 그 결과를
+// 첫 메시지에 같이 실어 보낸다.
+func TestThePromptSaysWhichRoundThisIs(t *testing.T) {
+	f := file("layered-architecture.md", attachedFile)
+
+	t.Run("승인이 실려 있으면 열라고 못 박는다", func(t *testing.T) {
+		p := Ask{Text: "올려줘", File: f}.prompt()
+		for _, want := range []string{
+			"올리는 모드",
+			"반드시 propose_note를 불러 PR을 열어",
+			"초안을 다시 보내달라고 하지 마",
+		} {
+			if !strings.Contains(p, want) {
+				t.Errorf("prompt missing %q:\n%s", want, p)
+			}
+		}
+	})
+
+	t.Run("확인이면 멈추라고 한다", func(t *testing.T) {
+		p := Ask{Text: "확인", File: f}.prompt()
+		if !strings.Contains(p, "확인 모드") || !strings.Contains(p, "멈춰") {
+			t.Errorf("확인 라운드인데 그렇게 안 적혀 있다:\n%s", p)
+		}
+		if strings.Contains(p, "PR을 열어") {
+			t.Errorf("승인이 없는데 PR을 열라고 적혀 있다:\n%s", p)
+		}
+	})
+}
+
+// 판정 문구는 goAhead의 복사본이 아니라 그 결과여야 한다. 둘이 갈라지면 프롬프트는
+// 열라고 적힌 채로 코드가 막는다 — 모델은 시킨 대로 propose_note를 부르고, 그는 PR
+// 대신 거절 메시지를 받는다. 겉모습이 지금 고치려는 버그와 똑같아서 제일 나쁘다.
+func TestTheVerdictNeverDisagreesWithTheGate(t *testing.T) {
+	for _, tc := range []struct{ name, text string }{
+		{"올려줘", "올려줘"},
+		{"만들어라", "만들어라"},
+		{"앞에 말이 붙어도", "이거 정리해서 넣어줘"},
+		{"짧은 대답", "그래"},
+		{"그가 정한 확인 낱말", "확인"},
+		{"확인해줘", "이거 확인해줘"},
+		{"물음", "어디에 넣을까?"},
+		{"말 없이 파일만", ""},
+		{"펜스 아래 승인", "```\n# 노트\n\n본문\n```\n올려줘"},
+		{"본문 문장은 승인이 아니다", "- 객체를 만들어 반환한다"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Ask{Text: tc.text, File: file("a.md", attachedFile)}.prompt()
+			said, gate := strings.Contains(p, "올리는 모드"), goAhead(tc.text)
+			if said != gate {
+				t.Errorf("프롬프트는 올리는 모드=%v라고 하는데 코드의 문은 %v다", said, gate)
+			}
+		})
+	}
+}
+
+// 판정은 첨부가 있을 때만 붙는다. 파일 없이 오는 말은 "위키 현황" 같은 질문일 수도
+// 있어서, 거기에 "추천만 하고 멈춰"를 붙이면 묻는 모드가 확인 모드로 끌려간다.
+func TestTheVerdictOnlyRidesWithAFile(t *testing.T) {
+	for _, text := range []string{"위키 현황", "```\n# 노트\n\n본문\n```\n\n올려줘"} {
+		if got := (Ask{Text: text}).prompt(); got != text {
+			t.Errorf("붙여넣기 길의 첫 메시지가 바뀌었다:\n got: %q\nwant: %q", got, text)
+		}
 	}
 }
 
